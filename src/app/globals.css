@@ -1,0 +1,227 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+
+  /* VS Code "Dark+" inspired observatory palette */
+  --color-vs-bg: var(--vs-bg);
+  --color-vs-panel: var(--vs-panel);
+  --color-vs-panel-2: var(--vs-panel-2);
+  --color-vs-hover: var(--vs-hover);
+  --color-vs-active: var(--vs-active);
+  --color-vs-border: var(--vs-border);
+  --color-vs-border-2: var(--vs-border-2);
+  --color-vs-text: var(--vs-text);
+  --color-vs-bright: var(--vs-bright);
+  --color-vs-dim: var(--vs-dim);
+  --color-vs-faint: var(--vs-faint);
+  --color-vs-blue: var(--vs-blue);
+  --color-vs-blue-hover: var(--vs-blue-hover);
+  --color-vs-blue-bright: var(--vs-blue-bright);
+  --color-vs-green: var(--vs-green);
+  --color-vs-green-dim: var(--vs-green-dim);
+  --color-vs-red: var(--vs-red);
+  --color-vs-yellow: var(--vs-yellow);
+  --color-vs-tan: var(--vs-tan);
+  --color-vs-purple: var(--vs-purple);
+  --color-vs-orange: var(--vs-orange);
+  --color-vs-teal: var(--vs-teal);
+  --color-vs-var: var(--vs-var);
+  --color-vs-fn: var(--vs-fn);
+  --color-vs-comment: var(--vs-comment);
+  --color-vs-folder: var(--vs-folder);
+
+  /* Crisp IDE corners */
+  --radius-sm: 0.125rem;
+  --radius-md: 0.1875rem;
+  --radius-lg: 0.25rem;
+  --radius-xl: 0.375rem;
+}
+
+/*
+ * Theme: VS Code "Dark+" — the observatory wears the IDE it watches.
+ * Chrome:  #1e1e1e editor / #252526 panels / #007acc status bar
+ * Syntax:  #c586c0 keyword · #9cdcfe variable · #dcdcaa function
+ *          #ce9178 string · #6a9955 comment · #4ec9b0 type
+ * Git:     #89d185 added · #e2c08d modified · #f14c4c deleted
+ */
+:root {
+  --radius: 0.25rem;
+  --background: #1e1e1e;
+  --foreground: #cccccc;
+  --card: #252526;
+  --card-foreground: #cccccc;
+  --popover: #252526;
+  --popover-foreground: #cccccc;
+  --primary: #007acc;
+  --primary-foreground: #ffffff;
+  --secondary: #3a3d41;
+  --secondary-foreground: #ffffff;
+  --muted: #2d2d2d;
+  --muted-foreground: #9d9d9d;
+  --accent: #094771;
+  --accent-foreground: #ffffff;
+  --destructive: #f14c4c;
+  --border: #333333;
+  --input: #3c3c3c;
+  --ring: #007acc;
+  --chart-1: #007acc;
+  --chart-2: #89d185;
+  --chart-3: #cca700;
+  --chart-4: #f14c4c;
+  --chart-5: #c586c0;
+  --sidebar: #252526;
+  --sidebar-foreground: #cccccc;
+  --sidebar-primary: #007acc;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #094771;
+  --sidebar-accent-foreground: #ffffff;
+  --sidebar-border: #333333;
+  --sidebar-ring: #007acc;
+
+  /* Custom vs-* scale */
+  --vs-bg: #1e1e1e;
+  --vs-panel: #252526;
+  --vs-panel-2: #2d2d2d;
+  --vs-hover: #2a2d2e;
+  --vs-active: #094771;
+  --vs-border: #2b2b2b;
+  --vs-border-2: #3c3c3c;
+  --vs-text: #cccccc;
+  --vs-bright: #e8e8e8;
+  --vs-dim: #9d9d9d;
+  --vs-faint: #6a6a6a;
+  --vs-blue: #007acc;
+  --vs-blue-hover: #1187d0;
+  --vs-blue-bright: #3794ff;
+  --vs-green: #89d185;
+  --vs-green-dim: #73c991;
+  --vs-red: #f14c4c;
+  --vs-yellow: #cca700;
+  --vs-tan: #e2c08d;
+  --vs-purple: #c586c0;
+  --vs-orange: #ce9178;
+  --vs-teal: #4ec9b0;
+  --vs-var: #9cdcfe;
+  --vs-fn: #dcdcaa;
+  --vs-comment: #6a9955;
+  --vs-folder: #dcb67a;
+}
+
+.dark {
+  --background: #1e1e1e;
+  --foreground: #cccccc;
+  --card: #252526;
+  --card-foreground: #cccccc;
+  --popover: #252526;
+  --popover-foreground: #cccccc;
+  --primary: #007acc;
+  --primary-foreground: #ffffff;
+  --secondary: #3a3d41;
+  --secondary-foreground: #ffffff;
+  --muted: #2d2d2d;
+  --muted-foreground: #9d9d9d;
+  --accent: #094771;
+  --accent-foreground: #ffffff;
+  --destructive: #f14c4c;
+  --border: #333333;
+  --input: #3c3c3c;
+  --ring: #007acc;
+  --chart-1: #007acc;
+  --chart-2: #89d185;
+  --chart-3: #cca700;
+  --chart-4: #f14c4c;
+  --chart-5: #c586c0;
+  --sidebar: #252526;
+  --sidebar-foreground: #cccccc;
+  --sidebar-primary: #007acc;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #094771;
+  --sidebar-accent-foreground: #ffffff;
+  --sidebar-border: #333333;
+  --sidebar-ring: #007acc;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* VS Code-style chrome details                                        */
+/* ------------------------------------------------------------------ */
+
+/* Editor selection color */
+::selection {
+  background: #264f78;
+  color: #e8e8e8;
+}
+
+/* Thin IDE scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #4f4f4f99 transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #4f4f4f99;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 0;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #5a5a5abb;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* force-rebuild marker v2 */
+
