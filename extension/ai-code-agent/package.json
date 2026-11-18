@@ -1,0 +1,113 @@
+{
+  "name": "ai-code-agent",
+  "displayName": "AI Code Agent — Z.ai Workspace Bridge",
+  "description": "Connects your VS Code workspace to the Z.ai Workspace Bridge: pair the browser dashboard, stream your file tree, and let the z.ai agent operate files and commands locally.",
+  "version": "0.5.0",
+  "publisher": "zai-local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "z.ai",
+    "bridge",
+    "workspace",
+    "agent",
+    "pairing"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "aiCodeAgent.connect",
+        "title": "Connect",
+        "category": "AI Code Agent"
+      },
+      {
+        "command": "aiCodeAgent.disconnect",
+        "title": "Disconnect",
+        "category": "AI Code Agent"
+      },
+      {
+        "command": "aiCodeAgent.toggle",
+        "title": "Connect or Disconnect",
+        "category": "AI Code Agent"
+      },
+      {
+        "command": "aiCodeAgent.sendMessage",
+        "title": "Send Message…",
+        "category": "AI Code Agent"
+      },
+      {
+        "command": "aiCodeAgent.setIdentity",
+        "title": "Set Workspace Identity…",
+        "category": "AI Code Agent"
+      },
+      {
+        "command": "aiCodeAgent.clearIdentity",
+        "title": "Clear Workspace Identity",
+        "category": "AI Code Agent"
+      },
+      {
+        "command": "aiCodeAgent.copyPairingCode",
+        "title": "Copy Pairing Code",
+        "category": "AI Code Agent"
+      },
+      {
+        "command": "aiCodeAgent.openSettings",
+        "title": "Open Settings",
+        "category": "AI Code Agent"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "aiCodeAgent",
+          "title": "AI Code Agent",
+          "icon": "media/activity-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "aiCodeAgent": [
+        {
+          "type": "tree",
+          "id": "aiCodeAgentPanel",
+          "name": "Bridge"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "AI Code Agent",
+      "properties": {
+        "aiCodeAgent.serverUrl": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "**Bridge base URL** — the dashboard preview URL you open in your browser (no trailing slash needed, e.g. `https://your-preview-host`). The extension connects its socket to `<serverUrl>/?XTransformPort=3003`.",
+          "order": 1
+        },
+        "aiCodeAgent.bridgePort": {
+          "type": "number",
+          "default": 3003,
+          "description": "Bridge service port behind the gateway (sent as the XTransformPort query parameter).",
+          "order": 2
+        },
+        "aiCodeAgent.autoConnect": {
+          "type": "boolean",
+          "default": true,
+          "description": "Connect automatically on startup when a server URL is configured.",
+          "order": 3
+        }
+      }
+    }
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.7.5"
+  }
+}

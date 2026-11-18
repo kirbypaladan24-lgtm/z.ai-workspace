@@ -1,0 +1,11 @@
+src/**
+node_modules/**
+out/**/*.map
+*.log
+bun.lock
+bun.lockb
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+tests/**
+.vscode/**
