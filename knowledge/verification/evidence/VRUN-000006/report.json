@@ -1,0 +1,382 @@
+{
+  "id": "RPT-VRUN-000006",
+  "runId": "VRUN-000006",
+  "knowledge": {
+    "id": "EXP-000011",
+    "version": 3,
+    "title": "AI-operator self-correction: verify an API exists in the INSTALLED project before using it — hallucinated APIs are a recurrent, high-severity agent failure mode",
+    "solutionUnderTest": "Before using any non-trivial API, verify it against the INSTALLED project, in this order: 1) DEPENDENCY: the package is in package.json AND the lockfile (package-lock.json / pnpm-lock.yaml / bun.lockb) — the lockfile records the exact RESOLVED version; docs describe the latest release, which may be newer. 2) INSTALLED VERSION: read node_modules/<pkg>/package.json version — the registry copy and the installed copy can differ; the installed one is what runs. 3) SYMBOL AND SIGNATURE at that version: check the package's entry .d.ts / exports map for the exact symbol — not just the name: parameter shapes and option keys drift across versions. A type check (tsc --noEmit, or the editor language server) is STRONGER than grep because it validates call shape, not just presence. 4) RUNTIME feature detection when behavior is version-dependent: guard with typeof obj.method === 'function' before relying on it. 5) Prefer APIs already used elsewhere in THIS codebase (grep src/) — consistency with the project beats novelty. 6) If the project ships a component library (shadcn/ui in this stack), use its components instead of hand-rolling. 7) If the API is absent at the installed version, STOP and adapt to what exists — never invent an intermediate version of the library. Cost: seconds per check, versus hours of runtime debugging.\n\nVERIFICATION PLAN (PLANNED — NOT EXECUTED; no evidence exists for v2 claims yet): V1 experimental: demonstrate the full chain on a real installed project — package.json -> lockfile resolved version -> node_modules/<pkg>/package.json version (the sandbox has an installed project; the user workspace only if it has node_modules). V2 experimental (sandbox, TS available): tsc --noEmit flags a call to a nonexistent method on an installed package (negative control) and passes the correct call (positive control). V3 doc-based (NOT yet inspected): lockfile semantics of the project's package manager. The '#1' -> 'recurrent' change REMOVES a claim rather than adding one and needs no evidence — the record now explicitly states the ranking is unquantified."
+  },
+  "generatedAt": "2026-11-19T11:26:28.468Z",
+  "generatedBy": "bridge report generator (assembled from persisted execution records)",
+  "verificationStatus": "VERIFIED",
+  "conclusion": {
+    "status": "VERIFIED",
+    "summary": "all 2 critical test(s) passed against real executions",
+    "glmInterpretation": "Both bridge cases passed against real executions on the user's machine (first round). Measured: V1a on the user's actual workspace — @prisma/client is declared as the RANGE ^6.11.1 in package.json while bun.lock records the EXACT resolved pin @prisma/client@6.19.2 (with registry tarball URL and integrity hash); the layer drift the record describes is real and demonstrated; the plausible-but-fabricated package 'react-super-router' is in NEITHER the manifest nor the lockfile (hallucinated dependencies are caught at layers 1-2 before any code runs); node_modules is ABSENT on that workspace (no node runtime) — recorded in the case output itself as an environmental limitation, with layer 3 demonstrated in the sandbox. V3 the live-fetched official Bun documentation (bun.sh/docs/install/lockfile) states bun install creates bun.lock, the format is text-based (since v1.2), a lockfile can be generated WITHOUT installing to node_modules (--lockfile-only — the documented layer distinction), and it should be committed to git. SUPPLEMENTARY (Z.ai sandbox VM, labeled): V1b the full three-layer chain on the installed project — manifest ^6.11.1 -> lockfile @prisma/client@6.19.2 -> node_modules/@prisma/client 6.19.2, all consistent; V2 tsc 5.9.3 against installed socket.io-client 4.8.4 — the correct call compiles (exit 0), the fabricated method s.setReconnectionLag(5) fails with TS2339 'Property does not exist', and the REAL method called with the wrong shape s.on(42) fails with TS2554 while grep still finds 'on(' 11 times in the installed .d.ts — the exact blind spot the record warns about (grep validates presence, not call shape). The retracted '#1' superlative needs no evidence: v2 REMOVED the claim and the record now states the ranking is unquantified.",
+    "stats": {
+      "planned": 2,
+      "generated": 2,
+      "executed": 2,
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0,
+      "blocked": 0,
+      "errors": 0,
+      "attempts": 2,
+      "iterations": 1,
+      "passRate": 100
+    },
+    "decidedAt": "2026-11-19T11:26:28.279Z",
+    "decidedBy": "bridge-evaluator (evidence-based)"
+  },
+  "originalProblem": {
+    "description": "EXP-000011 (latest version v3, content of the v2 technical revision) claims: (1) three layers are commonly confused — what the DOCS describe (latest release), what the lockfile RESOLVED (a specific version), and what node_modules CONTAINS (what runs) — and verification must walk down that chain because each layer can differ; (2) the project's lockfile records the exact resolved version while the manifest carries ranges; (3) a type check is STRONGER than grep because it validates call shape, not just name presence; (4) hallucinated dependencies are caught by checking manifest+lockfile before use. The v1 '#1 agent bug source' superlative was retracted in v2 and the ranking is now explicitly unquantified (nothing to verify — the retraction REMOVED a claim). This run executes the record's plan: V1a on the user's real workspace (manifest + lockfile layers, fabricated-dependency negative control, node_modules absence recorded honestly if applicable), V3 live Bun lockfile documentation, and V1b/V2 in the Z.ai sandbox VM (node_modules present, tsc available) as supplementary labeled evidence.",
+    "symptoms": "agent-written code calling APIs that do not exist in the installed version; runtime 'x.y is not a function' failures; confusing the latest documented release with the resolved/installed version",
+    "expectedBehavior": "V1a on the user's workspace: @prisma/client declared as the range ^6.11.1 in the manifest, resolved to the EXACT version @prisma/client@6.19.2 in bun.lock (with registry tarball + integrity), the drift between layers demonstrated, a plausible fabricated package (react-super-router) present in NEITHER layer (caught), and node_modules observed absent (no node runtime on that machine) — recorded as an environmental limitation, with layer 3 demonstrated in the sandbox. V3 the official Bun documentation states bun install creates bun.lock, the format is text-based (since v1.2), a lockfile can be generated WITHOUT installing to node_modules (--lockfile-only — the layer distinction), and it should be committed to git. V1b (sandbox): manifest ^6.11.1 -> lockfile @6.19.2 -> node_modules 6.19.2, all three layers consistent. V2 (sandbox): tsc passes the correct call (exit 0), fails the fabricated method (TS2339 Property does not exist), fails the real method with wrong call shape (TS2554) while g… (1076 chars)",
+    "actualBehavior": "to be measured by real execution (V1a/V3 on the user's machine; V1b/V2 already executed in the Z.ai sandbox VM, outputs preserved at scripts/verifications/exp011/)",
+    "facts": "the user's workspace is the z.ai-workspace-bridge clone with package.json (67 dependencies, ranges) and bun.lock (945 resolved packages, text-based JSONC-lenient format) but no node_modules; the Z.ai sandbox VM has the same project WITH node_modules and tsc 5.9.3; socket.io-client is installed at 4.8.4 in the sandbox.",
+    "assumptions": "the user's bun.lock parses with trailing-comma tolerance; the bun.sh docs page fetched live is authoritative; the sandbox's installed tree is representative of what the user's machine would contain after bun install.",
+    "environment": "user's machine via the bridge extension (Linux, Python 3.14.4, no node) for V1a/V3; Z.ai sandbox VM (bun, tsc 5.9.3, node_modules present) for V1b/V2",
+    "constraints": "V1a only READS the workspace (package.json, bun.lock, node_modules if present); the doc case fetches only the official bun.sh page; outputs below the 20KB truncation limit."
+  },
+  "hypothesis": {
+    "text": "Both bridge cases pass: the three-layer chain verifies on the user's real workspace with the manifest-range vs lockfile-pin drift demonstrated and the fabricated dependency caught at layers 1-2 (node_modules absent recorded honestly), and the Bun documentation confirms the lockfile semantics (created by bun install, text-based, distinct from node_modules, committed to git). The sandbox supplements (already executed) complete the evidence: all three layers consistent in the installed project, and tsc catching both the fabricated API and the wrong call shape that grep cannot see.",
+    "expectedObservation": "markers: V1A-CHAIN-VERIFIED, V3-DOC-VERIFIED",
+    "supportingEvidence": "VM dry-run of V1a on the fully-installed project reproduces the whole chain (^6.11.1 -> @6.19.2 -> installed 6.19.2, fabricated caught); V3 assertions verified against a live fetch; V2 tsc outputs preserved with exit codes (0 / TS2339 / TS2554) at scripts/verifications/exp011/v2-tsc-experiment-output.txt.",
+    "contradictingEvidence": "none observed; note that on the user's machine layer 3 cannot be exercised (no node_modules) — this is recorded in the case output itself, not hidden."
+  },
+  "hypothesisHistory": [
+    {
+      "n": 1,
+      "kind": "initial",
+      "hypothesis": "Both bridge cases pass: the three-layer chain verifies on the user's real workspace with the manifest-range vs lockfile-pin drift demonstrated and the fabricated dependency caught at layers 1-2 (node_modules absent recorded honestly), and the Bun documentation confirms the lockfile semantics (created by bun install, text-based, distinct from node_modules, committed to git). The sandbox supplements (already executed) complete the evidence: all three layers consistent in the installed project, and tsc catching both the fabricated API and the wrong call shape that grep cannot see.",
+      "expectedObservation": "markers: V1A-CHAIN-VERIFIED, V3-DOC-VERIFIED",
+      "changeNote": "initial hypothesis",
+      "createdAt": "2026-11-19T11:25:52.683Z",
+      "outcome": "2/2 executed tests passed (pass rate 100%)"
+    }
+  ],
+  "strategy": "Two bridge cases (V1a real-workspace chain with negative control; V3 live Bun lockfile docs) plus two sandbox supplements per the record's own plan designation (V1b installed-tree chain, V2 tsc-vs-grep controls). All bridge cases critical; the doc case flagged requiresNetwork.\n\nExperiments: Two bridge cases staged in the run sandbox (V1a real-workspace chain, V3 Bun lockfile docs), plus two sandbox supplements per the record's plan (V1b installed-tree chain, V2 tsc-vs-grep controls — outputs preserved at scripts/verifications/exp011/).",
+  "environment": {
+    "capturedAt": 1795087553313,
+    "os": "Linux kirby-LOQ-15IAX9E 7.0.0-43-generic #43-Ubuntu SMP PREEMPT_DYNAMIC Fri Oct 23 13:25:25 UTC 2026 x86_64 GNU/Linux\nexit code: 0",
+    "runtimes": "Python 3.14.4\n/bin/bash: line 1: node: command not found\ngit version 2.53.0\n3.46.1 2024-08-13 09:16:08 c9c2ab54ba1f5f46360f1b4f35d849cd3f080e6fc2b6c60e91b16c63f69aalt1 (64-bit)\nexit code: 0",
+    "sourceRevision": "6c04b92",
+    "journalRefs": [
+      "a6oqwm68",
+      "86fnvqoh",
+      "kqhypdq4"
+    ]
+  },
+  "reproducibility": {
+    "os": "Linux kirby-LOQ-15IAX9E 7.0.0-43-generic #43-Ubuntu SMP PREEMPT_DYNAMIC Fri Oct 23 13:25:25 UTC 2026 x86_64 GNU/Linux\nexit code: 0",
+    "runtimes": "Python 3.14.4\n/bin/bash: line 1: node: command not found\ngit version 2.53.0\n3.46.1 2024-08-13 09:16:08 c9c2ab54ba1f5f46360f1b4f35d849cd3f080e6fc2b6c60e91b16c63f69aalt1 (64-bit)\nexit code: 0",
+    "sourceRevision": "6c04b92",
+    "testCommands": [
+      {
+        "id": "VTC-000026",
+        "command": "python3 knowledge/verification/sandbox/VRUN-000006/v1a_chain.py",
+        "timeoutMs": 60000
+      },
+      {
+        "id": "VTC-000027",
+        "command": "bash knowledge/verification/sandbox/VRUN-000006/v3_bun_docs.sh",
+        "timeoutMs": 90000
+      }
+    ],
+    "note": "Re-run the listed commands in the recorded environment to reproduce. All outputs below were captured by the bridge from real executions."
+  },
+  "timeline": [
+    {
+      "n": 1,
+      "name": "Problem Analysis",
+      "status": "complete",
+      "startedAt": 1795087552683,
+      "completedAt": 1795087552683,
+      "durationMs": 0,
+      "details": "problem, symptoms, expected vs actual behavior, facts and assumptions recorded"
+    },
+    {
+      "n": 2,
+      "name": "Hypothesis Formulation",
+      "status": "complete",
+      "startedAt": 1795087552683,
+      "completedAt": 1795087552683,
+      "durationMs": 0,
+      "details": "Both bridge cases pass: the three-layer chain verifies on the user's real workspace with the manifest-range vs lockfile-pin drift demonstrated and the fabricated dependency caught at layers 1-2 (node_modules absent recorded honestly), and the Bun documentation confirms the lockfile semantics (create… (584 chars)"
+    },
+    {
+      "n": 3,
+      "name": "Experiment Design",
+      "status": "complete",
+      "startedAt": 1795087553607,
+      "completedAt": 1795087553607,
+      "durationMs": 0,
+      "details": "Two bridge cases staged in the run sandbox (V1a real-workspace chain, V3 Bun lockfile docs), plus two sandbox supplements per the record's plan (V1b installed-tree chain, V2 tsc-vs-grep controls — outputs preserved at scripts/verifications/exp011/)."
+    },
+    {
+      "n": 4,
+      "name": "Test Plan Generation",
+      "status": "complete",
+      "startedAt": 1795087553607,
+      "completedAt": 1795087553607,
+      "durationMs": 0,
+      "details": "2 test case(s) planned — review on the dashboard, then start verification"
+    },
+    {
+      "n": 5,
+      "name": "Environment Preparation",
+      "status": "complete",
+      "startedAt": 1795087552683,
+      "completedAt": 1795087553313,
+      "durationMs": 630,
+      "details": "environment captured from the real machine via journaled commands"
+    },
+    {
+      "n": 6,
+      "name": "Test Execution",
+      "status": "complete",
+      "startedAt": 1795087553924,
+      "completedAt": 1795087555316,
+      "durationMs": 1392,
+      "details": "2 executed · 2 passed · 0 failed · 0 errors"
+    },
+    {
+      "n": 7,
+      "name": "Result Analysis",
+      "status": "complete",
+      "startedAt": 1795087555316,
+      "completedAt": 1795087588279,
+      "durationMs": 32963,
+      "details": "Both bridge cases passed against real executions on the user's machine (first round). Measured: V1a on the user's actual workspace — @prisma/client is declared as the RANGE ^6.11.1 in package.json whi — engine decision: VERIFIED"
+    },
+    {
+      "n": 8,
+      "name": "Regression Testing",
+      "status": "skipped",
+      "startedAt": null,
+      "completedAt": null,
+      "durationMs": null,
+      "details": "no regression round requested — skipped"
+    },
+    {
+      "n": 9,
+      "name": "Final Verification",
+      "status": "complete",
+      "startedAt": 1795087588279,
+      "completedAt": 1795087588279,
+      "durationMs": 0,
+      "details": "all 2 critical test(s) passed against real executions"
+    },
+    {
+      "n": 10,
+      "name": "Report Generation",
+      "status": "pending",
+      "startedAt": null,
+      "completedAt": null,
+      "durationMs": null,
+      "details": ""
+    }
+  ],
+  "statistics": {
+    "planned": 2,
+    "generated": 2,
+    "executed": 2,
+    "passed": 2,
+    "failed": 0,
+    "skipped": 0,
+    "blocked": 0,
+    "errors": 0,
+    "attempts": 2,
+    "iterations": 1,
+    "passRate": 100
+  },
+  "testCases": [
+    {
+      "id": "VTC-000026",
+      "name": "V1a three-layer chain on the real workspace (manifest -> lockfile -> installed/absent)",
+      "objective": "verify the record's core method on the user's actual project files: manifest ranges, lockfile exact pins, layer drift, fabricated-dependency negative control, and honest layer-3 observation",
+      "category": "integration",
+      "round": 1,
+      "critical": true,
+      "expected": {
+        "expectedResult": "V1A-CHAIN-VERIFIED with the drift printed and the fabricated package caught",
+        "successCriteria": "exit 0, manifest range found, exact lockfile pin found, drift shown, fabricated in neither layer, layer 3 verified or absence recorded",
+        "failureCriteria": "chain broken or fabricated package slips through"
+      },
+      "criteria": {
+        "exitCode": 0,
+        "outputContains": [
+          "V1A-CHAIN-VERIFIED"
+        ],
+        "outputNotContains": []
+      },
+      "command": "python3 knowledge/verification/sandbox/VRUN-000006/v1a_chain.py",
+      "finalStatus": "PASS",
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "PASS",
+          "exitCode": 0,
+          "timedOut": false,
+          "durationMs": 86,
+          "startedAt": "2026-11-19T11:25:54.130Z",
+          "journalRef": "3ibcqxdd",
+          "note": "exit 0 + 1 output assertion(s) satisfied",
+          "output": "$ python3 knowledge/verification/sandbox/VRUN-000006/v1a_chain.py\nV1A layer1 manifest: @prisma/client declared as '^6.11.1' (a RANGE — what the manifest asks for)\nV1A layer2 lockfile: resolved to '@prisma/client@6.19.2' (EXACT version + registry tarball + integrity hash)\nV1A drift: manifest range '^6.11.1' vs lockfile pin '6.19.2' — each layer can differ; verification must walk down the chain\nV1A fabricated package 'react-super-router': in-manifest=False in-lockfile=False -> hallucinated dependency caught at layers 1-2\nV1A layer3: node_modules ABSENT on this workspace (no node runtime here) — recorded as an environmental limitation\nV1A-NODE-MODULES-ABSENT\nV1A layer3 is demonstrated in the Z.ai sandbox VM (installed tree present there) — see the run analysis\nV1A-CHAIN-VERIFIED\nexit code: 0"
+        }
+      ]
+    },
+    {
+      "id": "VTC-000027",
+      "name": "V3 doc-based: Bun lockfile semantics (live fetch)",
+      "objective": "verify against the ACTUAL official Bun documentation: the lockfile is created by bun install, is text-based, is distinct from node_modules (--lockfile-only), and should be committed to git",
+      "category": "validation",
+      "round": 1,
+      "critical": true,
+      "expected": {
+        "expectedResult": "V3-DOC-VERIFIED with quotes",
+        "successCriteria": "exit 0, all four documented statements found",
+        "failureCriteria": "doc fetch fails or documented statements differ"
+      },
+      "criteria": {
+        "exitCode": 0,
+        "outputContains": [
+          "V3-DOC-VERIFIED"
+        ],
+        "outputNotContains": []
+      },
+      "command": "bash knowledge/verification/sandbox/VRUN-000006/v3_bun_docs.sh",
+      "finalStatus": "PASS",
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "PASS",
+          "exitCode": 0,
+          "timedOut": false,
+          "durationMs": 600,
+          "startedAt": "2026-11-19T11:25:54.494Z",
+          "journalRef": "wg0xxp75",
+          "note": "exit 0 + 1 output assertion(s) satisfied",
+          "output": "$ bash knowledge/verification/sandbox/VRUN-000006/v3_bun_docs.sh\nDOC-SOURCE: https://bun.sh/docs/install/lockfile\nDOC-lockfile-created: FOUND\nDOC-text-based-format: FOUND\nDOC-distinct-from-node-modules: FOUND\nDOC-committed-to-git: FOUND\nDOC-QUOTE-layer-distinction: To generate a lockfile without installing to node_modules , use the --lockfile-only flag.\nDOC-QUOTE-text-based: Bun v1.2 changed the default lockfile format to the text-based bun.\nDOC-QUOTE-commit: Should it be committed to git? # Yes\nV3-DOC-VERIFIED\nexit code: 0"
+        }
+      ]
+    }
+  ],
+  "metrics": [
+    {
+      "id": "VMET-000034",
+      "runId": "VRUN-000006",
+      "testCaseId": "VTC-000026",
+      "name": "manifest_declared_range",
+      "value": "^6.11.1",
+      "unit": "semver range",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T11:26:28.279Z"
+    },
+    {
+      "id": "VMET-000035",
+      "runId": "VRUN-000006",
+      "testCaseId": "VTC-000026",
+      "name": "lockfile_resolved_version",
+      "value": "@prisma/client@6.19.2",
+      "unit": "exact pin",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T11:26:28.279Z"
+    },
+    {
+      "id": "VMET-000036",
+      "runId": "VRUN-000006",
+      "testCaseId": "VTC-000026",
+      "name": "fabricated_package_layers_hit",
+      "value": "0",
+      "unit": "layers",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T11:26:28.279Z"
+    },
+    {
+      "id": "VMET-000037",
+      "runId": "VRUN-000006",
+      "testCaseId": null,
+      "name": "tsc_positive_exit_code_sandbox",
+      "value": "0",
+      "unit": "",
+      "source": "reported",
+      "verified": false,
+      "recordedAt": "2026-11-19T11:26:28.279Z"
+    },
+    {
+      "id": "VMET-000038",
+      "runId": "VRUN-000006",
+      "testCaseId": null,
+      "name": "tsc_fabricated_exit_code_sandbox",
+      "value": "2",
+      "unit": "",
+      "source": "reported",
+      "verified": false,
+      "recordedAt": "2026-11-19T11:26:28.279Z"
+    },
+    {
+      "id": "VMET-000039",
+      "runId": "VRUN-000006",
+      "testCaseId": null,
+      "name": "tsc_wrong_shape_exit_code_sandbox",
+      "value": "2",
+      "unit": "",
+      "source": "reported",
+      "verified": false,
+      "recordedAt": "2026-11-19T11:26:28.279Z"
+    },
+    {
+      "id": "VMET-000040",
+      "runId": "VRUN-000006",
+      "testCaseId": null,
+      "name": "grep_hits_on_wrong_shape_call_sandbox",
+      "value": "11",
+      "unit": "",
+      "source": "reported",
+      "verified": false,
+      "recordedAt": "2026-11-19T11:26:28.279Z"
+    }
+  ],
+  "analyses": [
+    {
+      "id": "VANA-1-mwngsvqv",
+      "round": 1,
+      "submittedBy": "GLM (z.ai web)",
+      "createdAt": "2026-11-19T11:26:28.279Z",
+      "summary": "Both bridge cases passed against real executions on the user's machine (first round). Measured: V1a on the user's actual workspace — @prisma/client is declared as the RANGE ^6.11.1 in package.json while bun.lock records the EXACT resolved pin @prisma/client@6.19.2 (with registry tarball URL and integrity hash); the layer drift the record describes is real and demonstrated; the plausible-but-fabricated package 'react-super-router' is in NEITHER the manifest nor the lockfile (hallucinated dependencies are caught at layers 1-2 before any code runs); node_modules is ABSENT on that workspace (no node runtime) — recorded in the case output itself as an environmental limitation, with layer 3 demonstrated in the sandbox. V3 the live-fetched official Bun documentation (bun.sh/docs/install/lockfile) states bun install creates bun.lock, the format is text-based (since v1.2), a lockfile can be generated WITHOUT installing to node_modules (--lockfile-only — the documented layer distinction), and it should be committed to git. SUPPLEMENTARY (Z.ai sandbox VM, labeled): V1b the full three-layer chain on the installed project — manifest ^6.11.1 -> lockfile @prisma/client@6.19.2 -> node_modules/@prisma/client 6.19.2, all consistent; V2 tsc 5.9.3 against installed socket.io-client 4.8.4 — the correct call compiles (exit 0), the fabricated method s.setReconnectionLag(5) fails with TS2339 'Property does not exist', and the REAL method called with the wrong shape s.on(42) fails with TS2554 while grep still finds 'on(' 11 times in the installed .d.ts — the exact blind spot the record warns about (grep validates presence, not call shape). The retracted '#1' superlative needs no evidence: v2 REMOVED the claim and the record now states the ranking is unquantified.",
+      "comparison": "Every prediction matched: the manifest-range/lockfile-pin drift observed on the user's real files; the fabricated package caught at layers 1-2; all four Bun doc statements found verbatim; the sandbox three-layer chain consistent (6.19.2 across lockfile and installed tree); tsc exit codes 0/2/2 with the expected TS2339 and TS2554 error classes.",
+      "alternativeExplanations": "(1) Layer 3 could not run on the user's machine (node_modules absent — the workspace was never bun-installed there); the sandbox supplement covers it, clearly labeled as VM-executed. (2) The fabricated-package negative control uses one invented name; catching one plausible fake demonstrates the mechanism, not a statistical guarantee. (3) The docs-describe-latest-release layer is supported by the Prisma docs navigation (v7 exists alongside v6) rather than a dedicated assertion. (4) bun.lock's trailing-comma tolerance required a lenient parse — a strictly-JSON parser would misread the lockfile, which is itself a verification-relevant nuance.",
+      "recommendedModifications": "The verified evidence supports the record's revised claims. For the owner's review: the record's step-1 check (package in manifest AND lockfile) is now backed by a real-workspace demonstration including the range-vs-pin distinction; the tsc-vs-grep claim is backed by a controlled sandbox experiment with both failure classes (TS2339 fabricated, TS2554 wrong shape) and the grep blind spot shown. No changes required to the record's substance.",
+      "proposedConclusion": {
+        "status": "VERIFIED",
+        "summary": "Both critical bridge cases passed on real executions on the user's machine: the three-layer verification chain (with layer drift demonstrated and the fabricated dependency caught at manifest+lockfile, node_modules absence honestly recorded), and the Bun lockfile documentation semantics. Supplementary sandbox evidence completes the picture: the installed-tree layer consistent with the lockfile pin, and tsc catching both fabricated APIs and wrong call shapes that grep cannot see. Environmental limitation: node_modules and tsc are not available on the user's machine itself — those layers were verified in the Z.ai sandbox as the record's plan itself anticipated."
+      },
+      "engineDecision": {
+        "accepted": true,
+        "effectiveStatus": "VERIFIED",
+        "reason": "GLM's proposal matches the evidence: all 2 critical test(s) passed against real executions"
+      },
+      "metricIds": [
+        "VMET-000034",
+        "VMET-000035",
+        "VMET-000036",
+        "VMET-000037",
+        "VMET-000038",
+        "VMET-000039",
+        "VMET-000040"
+      ]
+    }
+  ],
+  "feedback": [],
+  "limitations": [
+    "Commands executed on the user's machine through the VS Code extension as the local user — no CPU/memory sandbox isolation is enforceable through this transport.",
+    "Network access for non-flagged tests could not be technically blocked; tests that declared network needs required explicit owner confirmation instead.",
+    "Attempt outputs are redacted for secrets and capped at 20,000 characters per attempt."
+  ]
+}

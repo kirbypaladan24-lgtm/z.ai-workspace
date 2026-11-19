@@ -1,0 +1,734 @@
+{
+  "id": "RPT-VRUN-000003",
+  "runId": "VRUN-000003",
+  "knowledge": {
+    "id": "EXP-000008",
+    "version": 3,
+    "title": "ML debugging: network does not learn — overfit 10 samples FIRST (single-batch sanity protocol) before tuning anything",
+    "solutionUnderTest": "1) Take ~10 training samples that SPAN the classes (>= 2 per class). A single-class batch voids the test: a constant predictor then reaches 100% accuracy with zero learning. 2) Disable augmentation / dropout / weight decay for the test and train ONLY on those samples. PASS CRITERIA are scale-relative, never a fixed constant: (a) batch accuracy reaches 100% (classification), or predictions match targets within target scale (regression); (b) loss falls far below its step-0 value and plateaus near the floor a memorizing model can reach — for cross-entropy that floor is ~0 and the step-0 value should be near ln(K) for K classes. A fixed threshold like loss < 1e-2 is NOT a valid criterion: loss scale depends on the loss family and target scale (MSE on targets in the 1000s may never reach 1e-2 even when fully memorized). 3) If the batch will not overfit after training longer at a raised LR, hunt the mechanical bug: (a) print tensor SHAPES at every boundary; (b) verify labels align with inputs — if data was shuffled, confirm inputs and labels were shuffled TOGETHER; (c) verify the loss receives raw logits and the label dtype it expects (e.g. CrossEntropyLoss expects integer class indices and applies softmax internally — doc-verifiable per framework version, not verified here); (d) check GRADIENT HEALTH, not all-non-zero: assert (i) no NaN/Inf grads anywhere and (ii) every layer that should train has at least one non-zero grad. Individual zero grads are NORMAL and expected — dead ReLU units, embedding rows absent from the tiny batch, frozen parameters (requires_grad=False gives .grad = None by design), unused graph branches. Asserting every parameter is non-zero is a false-positive generator, not a health check. (e) print the inputs themselves — is the signal actually present? 4) Only after the tiny batch overfits, scale to full data. If full-data training misbehaves while the tiny batch overfits cleanly, that POINTS TO generalization / regularization / data-pipeline causes (augmentation too strong, LR mismatched to the new batch size, shuffle or scaling bug appearing at scale) rather than a forward/backward bug — confirm by disabling augmentation and re-running before concluding.\n\nVERIFICATION PLAN (PLANNED — NOT EXECUTED; no evidence exists for v2 claims yet): C1 experimental (python3, user machine): compute chance-level CE = -log(1/K) for K=2 and K=10 (expect ln 2 = 0.6931, ln 10 = 2.3026) and CE of a near-one-hot correct prediction (approaches 0) — validates the pass-criteria baselines. C2 experimental (python3): a constant predictor scores 100% accuracy on a single-class batch but only ~1/K on a class-spanning batch — validates the class-spanning requirement. C3 doc-based (NOT yet inspected): label-dtype and internal-softmax expectations of the loss actually used, against that framework version's official docs. C4 experimental (requires a DL framework; NOT available on this machine — candidate env: a torch/tf sandbox): run this protocol on a known-correct small network (must PASS) and on a label-shuffled copy (must FAIL) — validates the discriminating power of the test itself."
+  },
+  "generatedAt": "2026-11-19T10:59:18.855Z",
+  "generatedBy": "bridge report generator (assembled from persisted execution records)",
+  "verificationStatus": "VERIFIED",
+  "conclusion": {
+    "status": "VERIFIED",
+    "summary": "all 8 critical test(s) passed against real executions",
+    "glmInterpretation": "All 8 critical cases passed against real executions on the user's machine (round 2; round 1's five failures were infrastructure failures caused by the engine's silent 2000-char command truncation — root cause fixed, mangled attempts preserved as VTA-000013/14/15/17/18). Measured: C1 chance-level CE equals ln(K) exactly for K=2 (0.693147) and K=10 (2.302585), near-one-hot CE approaches 0. C2 a constant predictor scores 100% on a single-class batch but exactly 25%/10% on class-spanning batches (K=4/10) — single-class batches void the test. C4a a finite-difference-certified healthy pure-python MLP (max grad rel-err 2.187e-09) memorizes 12 class-spanning samples in 400 steps (100% batch accuracy, loss 0.003293 vs ln(4)=1.386294 baseline). C4b the same architecture on independently shuffled labels fails the protocol even after 4x steps at raised LR (91.7% accuracy, loss 0.162318 > the 0.138629 pass bar) — mechanical bug correctly flagged. C4c at excess capacity (dh=16) the same budget fully memorizes the misaligned labels (100%, loss 0.023197) — the protocol's failure-to-overfit-implies-mechanical-bug inference requires task-matched capacity, exactly as the record's limitations prescribe. C5 a fixed loss<1e-2 threshold false-fails a fully-fitted MSE problem at target scale 1000 (MSE 98.599659, R2 0.999859) while passing scale 1 — scale-relative criteria required. C6 a healthy memorizing pipeline carries exactly-zero grads on 80 of 160 weights (8 dead ReLU units); the naive all-nonzero assertion fails while the correct no-NaN/Inf + per-layer-nonzero assertion passes. C3 the live-fetched official PyTorch 2.15 documentation states CE input is expected to be unnormalized logits and the target dtype is required to be long when using class indices.",
+    "stats": {
+      "planned": 8,
+      "generated": 8,
+      "executed": 8,
+      "passed": 8,
+      "failed": 0,
+      "skipped": 0,
+      "blocked": 0,
+      "errors": 0,
+      "attempts": 13,
+      "iterations": 2,
+      "passRate": 100
+    },
+    "decidedAt": "2026-11-19T10:59:14.121Z",
+    "decidedBy": "bridge-evaluator (evidence-based)"
+  },
+  "originalProblem": {
+    "description": "EXP-000008 (latest version v3, content of the v2 technical revision) claims: (1) the single-batch overfit test is a discriminator between mechanical bugs and convergence limits, not an absolute proof; (2) pass criteria must be scale-relative (100% batch accuracy; loss vs the ln(K) baseline and the memorization floor), never a fixed constant like loss<1e-2; (3) the tiny batch must span the classes — a single-class batch voids the test because a constant predictor wins it; (4) gradient checks verify FLOW not correctness, individual zero grads are normal (dead ReLUs, frozen params) and an all-nonzero-grad assertion is a false-positive generator; (5) the loss-dtype/logits expectations (e.g. CrossEntropyLoss) are doc-verifiable per framework version. This run executes the record's own embedded verification plan C1-C4, with C4 adapted to a pure-python MLP because no DL framework is installed on the workspace machine, plus a C4c capacity-boundary case added from design-iteration findings.",
+    "symptoms": "networks that never learn; hours of hyperparameter tuning against broken pipelines; false-positive gradient assertions; fixed loss thresholds misjudging good fits at large target scales",
+    "expectedBehavior": "C1: chance-level CE equals ln(K) exactly (K=2: 0.693147, K=10: 2.302585); near-one-hot correct-prediction CE approaches 0. C2: a constant predictor scores 100% on a single-class batch but exactly 1/K on a class-spanning batch. C4a: a finite-difference-verified healthy pure-python MLP (dh=4) reaches 100% batch accuracy with loss < 0.1*ln(4) within 400 steps at lr 0.5. C4b: the same architecture on independently shuffled labels fails the protocol even after 4x steps at raised LR (accuracy below 100%, loss above 0.1*ln4). C4c: at excess capacity (dh=16) the same budget fully memorizes the misaligned labels — documenting that the protocol's inference requires task-matched capacity (the record's own limitation note). C5: a fixed loss<1e-2 threshold false-fails a fully-fitted MSE problem at target scale 1000 (MSE~100 with R2>0.999) while passing the identical problem at scale 1 (MSE~1e-4). C6: a healthy memorizing pipeline with dead ReLU units carries exactly-zero grads on a large fraction o… (1303 chars)",
+    "actualBehavior": "to be measured by real execution on the user's machine through the bridge",
+    "facts": "-log(1/K) = ln(K); the CE floor of a fully memorizing classifier is ~0; MSE noise floors scale with the square of the target scale; ReLU units with negative pre-activations contribute exactly-zero gradients; excess-capacity networks can memorize random labels (Zhang et al. 2017), so the protocol's discriminating power depends on task-matched capacity — which the record's limitations section already mandates.",
+    "assumptions": "python3 3.14.4 on the user's machine; fixed seeds (random.Random) make every result deterministic and reproducible; a pure-python MLP substitutes the DL-framework variant of C4 (no framework installed); outbound HTTPS is available for the documentation check; identical results are expected from the VM dry-run environment (Python 3.12.16) and the target machine modulo floating-point formatting.",
+    "environment": "user's machine via the bridge extension: Linux, Python 3.14.4, numpy 2.3.5 present (unused — stdlib only), torch absent, git 2.53.0, sqlite3 3.46.1; VM dry-runs on Python 3.12.16",
+    "constraints": "stdlib-only experiments (math/random — no framework dependency); every case is non-destructive (no workspace files written; the doc check writes only to mktemp); outputs kept below the 20KB attempt truncation limit; the documentation case fetches only the official pytorch.org docs and is flagged requiresNetwork so it cannot run without explicit confirmation."
+  },
+  "hypothesis": {
+    "text": "All eight cases pass their declared criteria on real execution: the analytic baselines are exact; the class-spanning requirement holds; a gradient-verified healthy pipeline passes the protocol while a label-misaligned copy fails it at task-matched capacity; excess capacity memorizes misaligned labels (boundary documented, not hidden); a fixed 1e-2 loss threshold is scale-dependent and false-fails a fully-fitted large-scale MSE problem; dead ReLU units produce zero grads in a healthy pipeline, making the naive all-nonzero-grad assertion a false-positive generator; and the live-fetched PyTorch documentation confirms the logits/dtype expectations quoted in the record.",
+    "expectedObservation": "each case prints its declared marker and exits 0: C1-BASELINES-VERIFIED, C2-CLASS-SPANNING-REQUIRED, C4a-HEALTHY-PIPELINE-VERIFIED, C4b-MECHANICAL-BUG-CORRECTLY-FLAGGED, C4c-CAPACITY-BOUNDARY-DOCUMENTED, C5-SCALE-RELATIVE-CRITERIA-REQUIRED, C6-ZERO-GRADS-NORMAL-CONFIRMED, C3-DOC-VERIFIED",
+    "supportingEvidence": "VM-local dry-runs (Python 3.12.16) reproduce every marker; the FD gradient check max relative error 2.187e-09 certifies the pure-python implementation used as the known-healthy pipeline; design-iteration failures (capacity sensitivity, noise-vs-signal scaling bug in an early C5 draft) were caught locally and are reported in the analysis rather than hidden.",
+    "contradictingEvidence": "none observed in dry-runs; the capacity sensitivity discovered during design iteration is converted into boundary case C4c instead of being suppressed."
+  },
+  "hypothesisHistory": [
+    {
+      "n": 1,
+      "kind": "initial",
+      "hypothesis": "All eight cases pass their declared criteria on real execution: the analytic baselines are exact; the class-spanning requirement holds; a gradient-verified healthy pipeline passes the protocol while a label-misaligned copy fails it at task-matched capacity; excess capacity memorizes misaligned labels (boundary documented, not hidden); a fixed 1e-2 loss threshold is scale-dependent and false-fails a fully-fitted large-scale MSE problem; dead ReLU units produce zero grads in a healthy pipeline, making the naive all-nonzero-grad assertion a false-positive generator; and the live-fetched PyTorch documentation confirms the logits/dtype expectations quoted in the record.",
+      "expectedObservation": "each case prints its declared marker and exits 0: C1-BASELINES-VERIFIED, C2-CLASS-SPANNING-REQUIRED, C4a-HEALTHY-PIPELINE-VERIFIED, C4b-MECHANICAL-BUG-CORRECTLY-FLAGGED, C4c-CAPACITY-BOUNDARY-DOCUMENTED, C5-SCALE-RELATIVE-CRITERIA-REQUIRED, C6-ZERO-GRADS-NORMAL-CONFIRMED, C3-DOC-VERIFIED",
+      "changeNote": "initial hypothesis",
+      "createdAt": "2026-11-19T10:51:18.501Z",
+      "outcome": "3/8 executed tests passed (pass rate 37.5%)"
+    },
+    {
+      "n": 2,
+      "kind": "regression",
+      "hypothesis": "The five round-1 failures were infrastructure failures, not experimental results: the engine silently truncated case commands to 2000 chars (appending an ellipsis marker), so bash executed mangled scripts (heredoc delimited by end-of-file; python died on SyntaxError U+2026). The engine now REFUSES oversized commands instead of truncating them. The experiment scripts are staged verbatim in the run sandbox (sha256-verified on the user's machine) and the cases invoke them by path. With commands intact, the same five cases should pass on real execution exactly as the VM dry-runs predicted.",
+      "expectedObservation": "all five updated cases execute the full scripts and print their markers: C4a-HEALTHY-PIPELINE-VERIFIED, C4b-MECHANICAL-BUG-CORRECTLY-FLAGGED, C4c-CAPACITY-BOUNDARY-DOCUMENTED, C6-ZERO-GRADS-NORMAL-CONFIRMED, C3-DOC-VERIFIED",
+      "changeNote": "root cause: normalizeCase applied truncate(command, 2000) — five of eight commands were silently mangled (attempts VTA-000013/14/15/17/18 preserve the mangled commands and their SyntaxError outputs). Fix applied to the engine: commands over MAX_CASE_COMMAND_CHARS=2000 are now refused at plan/update time, never truncated. Scripts staged via journaled write_file into knowledge/verification/sandbox/VRUN-000003/ (c4_protocol.py 2f923811..., c6_zero_grads.py 4037d077..., c3_pytorch_doc.sh 347ff9cd...); case commands now invoke them by relative path (workspace cwd).",
+      "createdAt": "2026-11-19T10:57:58.477Z",
+      "outcome": "8/8 executed tests passed (pass rate 100%)"
+    }
+  ],
+  "strategy": "Execute the record's own embedded verification plan: C1/C2 analytic baselines (exact math, deterministic), C4a/C4b protocol discriminating power on a finite-difference-certified pure-python MLP at task-matched capacity (dh=4), C4c the capacity boundary at dh=16, C5 fixed-threshold scale dependence via exact least squares at two target scales, C6 gradient-health semantics with dead ReLU units, C3 live documentation inspection (official PyTorch docs fetched from the user's machine). One case per claim class; all cases critical; the doc case is flagged requiresNetwork and executes only with explicit confirmation.\n\nExperiments: Eight single-purpose deterministic experiments, one per claim class (C1/C2 analytic baselines, C4a/C4b discriminating power at task-matched capacity, C4c capacity boundary, C5 threshold scale-dependence, C6 gradient-health semantics, C3 live documentation inspection). Pure-python stdlib only; fixed seeds; no workspace writes.",
+  "environment": {
+    "capturedAt": 1795085478798,
+    "os": "Linux kirby-LOQ-15IAX9E 7.0.0-43-generic #43-Ubuntu SMP PREEMPT_DYNAMIC Fri Oct 23 13:25:25 UTC 2026 x86_64 GNU/Linux\nexit code: 0",
+    "runtimes": "Python 3.14.4\n/bin/bash: line 1: node: command not found\ngit version 2.53.0\n3.46.1 2024-08-13 09:16:08 c9c2ab54ba1f5f46360f1b4f35d849cd3f080e6fc2b6c60e91b16c63f69aalt1 (64-bit)\nexit code: 0",
+    "sourceRevision": "6c04b92",
+    "journalRefs": [
+      "z2pv9s98",
+      "e8xehc1s",
+      "1g5ih2c8"
+    ]
+  },
+  "reproducibility": {
+    "os": "Linux kirby-LOQ-15IAX9E 7.0.0-43-generic #43-Ubuntu SMP PREEMPT_DYNAMIC Fri Oct 23 13:25:25 UTC 2026 x86_64 GNU/Linux\nexit code: 0",
+    "runtimes": "Python 3.14.4\n/bin/bash: line 1: node: command not found\ngit version 2.53.0\n3.46.1 2024-08-13 09:16:08 c9c2ab54ba1f5f46360f1b4f35d849cd3f080e6fc2b6c60e91b16c63f69aalt1 (64-bit)\nexit code: 0",
+    "sourceRevision": "6c04b92",
+    "testCommands": [
+      {
+        "id": "VTC-000009",
+        "command": "python3 - <<'PYEOF'\nimport math, sys\n\nok = True\n# C1a: chance-level CE = -log(1/K) = ln(K) for K=2 and K=10\nfor K in (2, 10):\n    chance = -math.log(1.0 / K)\n    expect = math.log(K)\n    match = abs(chance - expect) < 1e-12\n    ok = ok and match\n    print(f\"C1 K={K} chance-CE={chance:.6f} ln(K)={expect:.6f} exact-match={match}\")\n\n# C1b: CE of a near-one-hot confident correct prediction approaches 0\np_correct = 1.0 - 1e-9\nce_conf = -math.log(p_correct)\nprint(f\"C1 near-one-hot CE={ce_conf:.9f}\")\nok = ok and ce_conf < 1e-6\n\n# C1c: constant p=1/K prediction on the true class = ln(K)\nK = 10\nce_const = -math.log(1.0 / K)\nprint(f\"C1 constant-predictor CE on true class={ce_const:.6f}\")\nok = ok and abs(ce_const - math.log(K)) < 1e-12\n\n# reference constants quoted in the knowledge record\nprint(f\"C1 ln2={math.log(2):.6f} ln10={math.log(10):.6f}\")\nok = ok and abs(math.log(2) - 0.693147) < 1e-5 and abs(math.log(10) - 2.302585) < 1e-5\n\nprint(\"C1-BASELINES-VERIFIED\" if ok else \"C1-BASELINES-FAILED\")\nsys.exit(0 if ok else 1)\nPYEOF",
+        "timeoutMs": 60000
+      },
+      {
+        "id": "VTC-000010",
+        "command": "python3 - <<'PYEOF'\nimport sys\n\nok = True\n# A constant predictor always outputs class c.\n# Single-class batch (all labels = c): it scores 100% with zero learning.\n# Class-spanning balanced batch: it scores exactly 1/K.\nfor K, c in ((4, 2), (10, 7)):\n    single = [c] * 10                         # single-class batch\n    spanning = [i % K for i in range(K * 3)]  # 3 samples per class, spans all classes\n    acc_single = sum(1 for y in single if y == c) / len(single)\n    acc_span = sum(1 for y in spanning if y == c) / len(spanning)\n    expected_span = 1.0 / K\n    print(f\"C2 K={K} single-class-batch acc={acc_single * 100:.1f}PCT spanning-batch acc={acc_span * 100:.1f}PCT expected-chance={expected_span * 100:.1f}PCT\")\n    ok = ok and acc_single == 1.0 and abs(acc_span - expected_span) < 1e-12\n\n# A single-class batch therefore cannot detect failure-to-learn: the constant\n# predictor \"passes\" a 100%-accuracy criterion without any signal.\nprint(\"C2-SINGLE-CLASS-VOIDS-TEST: CONFIRMED\")\nprint(\"C2-CLASS-SPANNING-REQUIRED\")\nsys.exit(0 if ok else 1)\nPYEOF",
+        "timeoutMs": 60000
+      },
+      {
+        "id": "VTC-000011",
+        "command": "python3 knowledge/verification/sandbox/VRUN-000003/c4_protocol.py healthy 4",
+        "timeoutMs": 120000
+      },
+      {
+        "id": "VTC-000012",
+        "command": "python3 knowledge/verification/sandbox/VRUN-000003/c4_protocol.py shuffled 4",
+        "timeoutMs": 120000
+      },
+      {
+        "id": "VTC-000013",
+        "command": "python3 knowledge/verification/sandbox/VRUN-000003/c4_protocol.py boundary 16",
+        "timeoutMs": 120000
+      },
+      {
+        "id": "VTC-000014",
+        "command": "python3 - <<'PYEOF'\nimport math, random, sys\n\n# Fixed absolute thresholds are invalid across target scales. Two identical\n# regression problems differing ONLY in target scale (1x vs 1000x): the whole\n# target (signal AND noise) is scaled. Both are fitted to their irreducible\n# noise floor by exact least squares - i.e. both are \"fully memorized\" in the\n# sense that no model can beat the noise floor.\nrng = random.Random(2024)\n\ndef make_data(scale):\n    xs, ys = [], []\n    for i in range(40):\n        x = rng.uniform(0, 1)\n        y = (3.0 * x + rng.gauss(0, 0.01)) * scale\n        xs.append(x); ys.append(y)\n    return xs, ys\n\ndef fit_least_squares(xs, ys):\n    n = len(xs)\n    mx = sum(xs) / n; my = sum(ys) / n\n    sxx = sum((x - mx) ** 2 for x in xs)\n    sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))\n    w = sxy / sxx\n    b = my - w * mx\n    return w, b\n\ndef mse_and_r2(xs, ys, w, b):\n    n = len(xs)\n    mse = sum((y - (w * x + b)) ** 2 for x, y in zip(xs, ys)) / n\n    var = sum((y - (sum(ys) / n)) ** 2 for y in ys) / n\n    return mse, 1.0 - mse / var\n\nresults = {}\nfor name, scale in ((\"scale1\", 1.0), (\"scale1000\", 1000.0)):\n    xs, ys = make_data(scale)\n    w, b = fit_least_squares(xs, ys)\n    mse, r2 = mse_and_r2(xs, ys, w, b)\n    results[name] = (mse, r2)\n    fixed = \"PASS\" if mse < 1e-2 else \"FAIL\"\n    print(f\"C5 {name}: MSE={mse:.6f} R2={r2:.6f} fixed-threshold(loss<1e-2)={fixed}\")\n\nfixed_scale1 = results[\"scale1\"][0] < 1e-2\nfixed_scale1000 = results[\"scale1000\"][0] < 1e-2\nrel_ok = results[\"scale1\"][1] > 0.99 and results[\"scale1000\"][1] > 0.99\n\nopposite = fixed_scale1 != fixed_scale1000\nprint(f\"C5 fixed-threshold verdicts differ across scales: {opposite}\")\nprint(f\"C5 scale-relative (R2>0.99) verdicts consistent: {rel_ok}\")\nok = opposite and rel_ok\nprint(\"C5-FIXED-THRESHOLD-SCALE-DEPENDENT\" if opposite else \"C5-FIXED-THRESHOLD-HELD\")\nprint(\"C5-SCALE-RELATIVE-CRITERIA-REQUIRED\" if ok else \"C5-FAILED\")\nsys.exit(0 if ok else 1)\nPYEOF",
+        "timeoutMs": 60000
+      },
+      {
+        "id": "VTC-000015",
+        "command": "python3 knowledge/verification/sandbox/VRUN-000003/c6_zero_grads.py",
+        "timeoutMs": 120000
+      },
+      {
+        "id": "VTC-000016",
+        "command": "bash knowledge/verification/sandbox/VRUN-000003/c3_pytorch_doc.sh",
+        "timeoutMs": 90000
+      }
+    ],
+    "note": "Re-run the listed commands in the recorded environment to reproduce. All outputs below were captured by the bridge from real executions."
+  },
+  "timeline": [
+    {
+      "n": 1,
+      "name": "Problem Analysis",
+      "status": "complete",
+      "startedAt": 1795085478501,
+      "completedAt": 1795085478501,
+      "durationMs": 0,
+      "details": "problem, symptoms, expected vs actual behavior, facts and assumptions recorded"
+    },
+    {
+      "n": 2,
+      "name": "Hypothesis Formulation",
+      "status": "complete",
+      "startedAt": 1795085478501,
+      "completedAt": 1795085478501,
+      "durationMs": 0,
+      "details": "All eight cases pass their declared criteria on real execution: the analytic baselines are exact; the class-spanning requirement holds; a gradient-verified healthy pipeline passes the protocol while a label-misaligned copy fails it at task-matched capacity; excess capacity memorizes misaligned label… (673 chars)"
+    },
+    {
+      "n": 3,
+      "name": "Experiment Design",
+      "status": "complete",
+      "startedAt": 1795085491055,
+      "completedAt": 1795085491055,
+      "durationMs": 0,
+      "details": "Eight single-purpose deterministic experiments, one per claim class (C1/C2 analytic baselines, C4a/C4b discriminating power at task-matched capacity, C4c capacity boundary, C5 threshold scale-dependence, C6 gradient-health semantics, C3 live documentation inspection). Pure-python stdlib only; fixed … (327 chars)"
+    },
+    {
+      "n": 4,
+      "name": "Test Plan Generation",
+      "status": "complete",
+      "startedAt": 1795085491055,
+      "completedAt": 1795085491055,
+      "durationMs": 0,
+      "details": "8 test case(s) planned — review on the dashboard, then start verification"
+    },
+    {
+      "n": 5,
+      "name": "Environment Preparation",
+      "status": "complete",
+      "startedAt": 1795085478501,
+      "completedAt": 1795085478798,
+      "durationMs": 297,
+      "details": "environment captured from the real machine via journaled commands"
+    },
+    {
+      "n": 6,
+      "name": "Test Execution",
+      "status": "complete",
+      "startedAt": 1795085496652,
+      "completedAt": 1795085881939,
+      "durationMs": 385287,
+      "details": "8 executed · 8 passed · 0 failed · 0 errors"
+    },
+    {
+      "n": 7,
+      "name": "Result Analysis",
+      "status": "running",
+      "startedAt": 1795085881939,
+      "completedAt": null,
+      "durationMs": null,
+      "details": "awaiting GLM result analysis (bridge-validated)…"
+    },
+    {
+      "n": 8,
+      "name": "Regression Testing",
+      "status": "complete",
+      "startedAt": 1795085878477,
+      "completedAt": 1795085954121,
+      "durationMs": 75644,
+      "details": "regression round 2 analyzed: 8/8 passed"
+    },
+    {
+      "n": 9,
+      "name": "Final Verification",
+      "status": "complete",
+      "startedAt": 1795085954121,
+      "completedAt": 1795085954121,
+      "durationMs": 0,
+      "details": "all 8 critical test(s) passed against real executions"
+    },
+    {
+      "n": 10,
+      "name": "Report Generation",
+      "status": "pending",
+      "startedAt": null,
+      "completedAt": null,
+      "durationMs": null,
+      "details": ""
+    }
+  ],
+  "statistics": {
+    "planned": 8,
+    "generated": 8,
+    "executed": 8,
+    "passed": 8,
+    "failed": 0,
+    "skipped": 0,
+    "blocked": 0,
+    "errors": 0,
+    "attempts": 13,
+    "iterations": 2,
+    "passRate": 100
+  },
+  "testCases": [
+    {
+      "id": "VTC-000009",
+      "name": "C1 analytic baselines: chance CE = ln(K), confident CE -> 0",
+      "objective": "validate every baseline number the record quotes (ln2=0.693147, ln10=2.302585, near-one-hot CE approaching 0)",
+      "category": "validation",
+      "round": 1,
+      "critical": true,
+      "expected": {
+        "expectedResult": "C1-BASELINES-VERIFIED with exact ln(K) matches",
+        "successCriteria": "exit 0, output contains C1-BASELINES-VERIFIED",
+        "failureCriteria": "any baseline mismatch or missing marker"
+      },
+      "criteria": {
+        "exitCode": 0,
+        "outputContains": [
+          "C1-BASELINES-VERIFIED"
+        ],
+        "outputNotContains": []
+      },
+      "command": "python3 - <<'PYEOF'\nimport math, sys\n\nok = True\n# C1a: chance-level CE = -log(1/K) = ln(K) for K=2 and K=10\nfor K in (2, 10):\n    chance = -math.log(1.0 / K)\n    expect = math.log(K)\n    match = abs(chance - expect) < 1e-12\n    ok = ok and match\n    print(f\"C1 K={K} chance-CE={chance:.6f} ln(K)={expect:.6f} exact-match={match}\")\n\n# C1b: CE of a near-one-hot confident correct prediction approaches 0\np_correct = 1.0 - 1e-9\nce_conf = -math.log(p_correct)\nprint(f\"C1 near-one-hot CE={ce_conf:.9f}\")\nok = ok and ce_conf < 1e-6\n\n# C1c: constant p=1/K prediction on the true class = ln(K)\nK = 10\nce_const = -math.log(1.0 / K)\nprint(f\"C1 constant-predictor CE on true class={ce_const:.6f}\")\nok = ok and abs(ce_const - math.log(K)) < 1e-12\n\n# reference constants quoted in the knowledge record\nprint(f\"C1 ln2={math.log(2):.6f} ln10={math.log(10):.6f}\")\nok = ok and abs(math.log(2) - 0.693147) < 1e-5 and abs(math.log(10) - 2.302585) < 1e-5\n\nprint(\"C1-BASELINES-VERIFIED\" if ok else \"C1-BASELINES-FAILED\")\nsys.exit(0 if ok else 1)\nPYEOF",
+      "finalStatus": "PASS",
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "PASS",
+          "exitCode": 0,
+          "timedOut": false,
+          "durationMs": 102,
+          "startedAt": "2026-11-19T10:51:36.793Z",
+          "journalRef": "frr1ma42",
+          "note": "exit 0 + 1 output assertion(s) satisfied",
+          "output": "$ python3 - <<'PYEOF'\nimport math, sys\n\nok = True\n# C1a: chance-level CE = -log(1/K) = ln(K) for K=2 and K=10\nfor K in (2, 10):\n    chance = -math.log(1.0 / K)\n    expect = math.log(K)\n    match = abs(chance - expect) < 1e-12\n    ok = ok and match\n    print(f\"C1 K={K} chance-CE={chance:.6f} ln(K)={expect:.6f} exact-match={match}\")\n\n# C1b: CE of a near-one-hot confident correct prediction approaches 0\np_correct = 1.0 - 1e-9\nce_conf = -math.log(p_correct)\nprint(f\"C1 near-one-hot CE={ce_conf:.9f}\")\nok = ok and ce_conf < 1e-6\n\n# C1c: constant p=1/K prediction on the true class = ln(K)\nK = 10\nce_const = -math.log(1.0 / K)\nprint(f\"C1 constant-predictor CE on true class={ce_const:.6f}\")\nok = ok and abs(ce_const - math.log(K)) < 1e-12\n\n# reference constants quoted in the knowledge record\nprint(f\"C1 ln2={math.log(2):.6f} ln10={math.log(10):.6f}\")\nok = ok and abs(math.log(2) - 0.693147) < 1e-5 and abs(math.log(10) - 2.302585) < 1e-5\n\nprint(\"C1-BASELINES-VERIFIED\" if ok else \"C1-BASELINES-FAILED\")\nsys.exit(0 if ok else 1)\nPYEOF\nC1 K=2 chance-CE=0.693147 ln(K)=0.693147 exact-match=True\nC1 K=10 chance-CE=2.302585 ln(K)=2.302585 exact-match=True\nC1 near-one-hot CE=0.000000001\nC1 constant-predictor CE on true class=2.302585\nC1 ln2=0.693147 ln10=2.302585\nC1-BASELINES-VERIFIED\nexit code: 0"
+        }
+      ]
+    },
+    {
+      "id": "VTC-000010",
+      "name": "C2 class-spanning requirement: single-class batch voids the test",
+      "objective": "show a constant predictor scores 100% on a single-class batch but exactly 1/K on a class-spanning batch",
+      "category": "validation",
+      "round": 1,
+      "critical": true,
+      "expected": {
+        "expectedResult": "C2-CLASS-SPANNING-REQUIRED",
+        "successCriteria": "exit 0, output contains C2-CLASS-SPANNING-REQUIRED",
+        "failureCriteria": "constant predictor fails to win the single-class batch"
+      },
+      "criteria": {
+        "exitCode": 0,
+        "outputContains": [
+          "C2-CLASS-SPANNING-REQUIRED"
+        ],
+        "outputNotContains": []
+      },
+      "command": "python3 - <<'PYEOF'\nimport sys\n\nok = True\n# A constant predictor always outputs class c.\n# Single-class batch (all labels = c): it scores 100% with zero learning.\n# Class-spanning balanced batch: it scores exactly 1/K.\nfor K, c in ((4, 2), (10, 7)):\n    single = [c] * 10                         # single-class batch\n    spanning = [i % K for i in range(K * 3)]  # 3 samples per class, spans all classes\n    acc_single = sum(1 for y in single if y == c) / len(single)\n    acc_span = sum(1 for y in spanning if y == c) / len(spanning)\n    expected_span = 1.0 / K\n    print(f\"C2 K={K} single-class-batch acc={acc_single * 100:.1f}PCT spanning-batch acc={acc_span * 100:.1f}PCT expected-chance={expected_span * 100:.1f}PCT\")\n    ok = ok and acc_single == 1.0 and abs(acc_span - expected_span) < 1e-12\n\n# A single-class batch therefore cannot detect failure-to-learn: the constant\n# predictor \"passes\" a 100%-accuracy criterion without any signal.\nprint(\"C2-SINGLE-CLASS-VOIDS-TEST: CONFIRMED\")\nprint(\"C2-CLASS-SPANNING-REQUIRED\")\nsys.exit(0 if ok else 1)\nPYEOF",
+      "finalStatus": "PASS",
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "PASS",
+          "exitCode": 0,
+          "timedOut": false,
+          "durationMs": 107,
+          "startedAt": "2026-11-19T10:51:37.086Z",
+          "journalRef": "5p2zd7ei",
+          "note": "exit 0 + 1 output assertion(s) satisfied",
+          "output": "$ python3 - <<'PYEOF'\nimport sys\n\nok = True\n# A constant predictor always outputs class c.\n# Single-class batch (all labels = c): it scores 100% with zero learning.\n# Class-spanning balanced batch: it scores exactly 1/K.\nfor K, c in ((4, 2), (10, 7)):\n    single = [c] * 10                         # single-class batch\n    spanning = [i % K for i in range(K * 3)]  # 3 samples per class, spans all classes\n    acc_single = sum(1 for y in single if y == c) / len(single)\n    acc_span = sum(1 for y in spanning if y == c) / len(spanning)\n    expected_span = 1.0 / K\n    print(f\"C2 K={K} single-class-batch acc={acc_single * 100:.1f}PCT spanning-batch acc={acc_span * 100:.1f}PCT expected-chance={expected_span * 100:.1f}PCT\")\n    ok = ok and acc_single == 1.0 and abs(acc_span - expected_span) < 1e-12\n\n# A single-class batch therefore cannot detect failure-to-learn: the constant\n# predictor \"passes\" a 100%-accuracy criterion without any signal.\nprint(\"C2-SINGLE-CLASS-VOIDS-TEST: CONFIRMED\")\nprint(\"C2-CLASS-SPANNING-REQUIRED\")\nsys.exit(0 if ok else 1)\nPYEOF\nC2 K=4 single-class-batch acc=100.0PCT spanning-batch acc=25.0PCT expected-chance=25.0PCT\nC2 K=10 single-class-batch acc=100.0PCT spanning-batch acc=10.0PCT expected-chance=10.0PCT\nC2-SINGLE-CLASS-VOIDS-TEST: CONFIRMED\nC2-CLASS-SPANNING-REQUIRED\nexit code: 0"
+        }
+      ]
+    },
+    {
+      "id": "VTC-000011",
+      "name": "C4a healthy pipeline must PASS the protocol (pure-python MLP, FD-certified)",
+      "objective": "known-correct implementation (finite-difference gradient check) memorizes 12 class-spanning samples: 100% batch accuracy, loss far below ln(4) baseline",
+      "category": "unit",
+      "round": 1,
+      "critical": true,
+      "expected": {
+        "expectedResult": "C4a-HEALTHY-PIPELINE-VERIFIED",
+        "successCriteria": "exit 0, FD rel-err < 1e-4, final acc 100%, loss < 0.1*ln(4)",
+        "failureCriteria": "FD check fails or healthy pipeline does not pass the protocol"
+      },
+      "criteria": {
+        "exitCode": 0,
+        "outputContains": [
+          "C4a-HEALTHY-PIPELINE-VERIFIED"
+        ],
+        "outputNotContains": []
+      },
+      "command": "python3 knowledge/verification/sandbox/VRUN-000003/c4_protocol.py healthy 4",
+      "finalStatus": "PASS",
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "FAIL",
+          "exitCode": 1,
+          "timedOut": false,
+          "durationMs": 180,
+          "startedAt": "2026-11-19T10:51:37.321Z",
+          "journalRef": "6bk7sld1",
+          "note": "exit code 1 ≠ expected 0",
+          "output": "$ python3 - healthy 4 <<'PYEOF'\nimport math, random, sys\n\n# C4 protocol core: pure-python MLP 6 -> dh(ReLU) -> 4, CE loss, SGD.\n# Modes:\n#   healthy  DH        - FD gradient check + 400 steps @ lr 0.5. Protocol must PASS.\n#   shuffled 4         - misaligned labels, protocol escalation (1600 total, lr 1.0).\n#                        Protocol must FAIL -> mechanical bug correctly flagged.\n#   boundary 16        - EXCESS capacity at the SAME budget as healthy (400 @ 0.5):\n#                        misaligned labels get fully memorized -> documents the\n#                        capacity boundary of the protocol's inference.\ndef gen_data(seed=42, n=12, din=6, K=4):\n    rng = random.Random(seed)\n    centers = [[rng.uniform(-1, 1) for _ in range(din)] for _ in range(K)]\n    X, Y = [], []\n    for i in range(n):\n        c = i % K\n        X.append([centers[c][j] + rng.gauss(0, 0.25) for j in range(din)])\n        Y.append(c)\n    return X, Y\n\ndef init_net(seed=7, din=6, dh=4, K=4):\n    rng = random.Random(seed)\n    W1 = [[rng.gauss(0, math.sqrt(2.0 / din)) for _ in range(dh)] for _ in range(din)]\n    b1 = [0.0] * dh\n    W2 = [[rng.gauss(0, math.sqrt(2.0 / dh)) for _ in range(K)] for _ in range(dh)]\n    b2 = [0.0] * K\n    return W1, b1, W2, b2\n\ndef forward(X, W1, b1, W2, b2):\n    H, L = [], []\n    for x in X:\n        h = [max(0.0, sum(x[i] * W1[i][j] for i in range(len(x))) + b1[j]) for j in range(len(b1))]\n        l = [sum(h[j] * W2[j][k] for j in range(len(h))) + b2[k] for k in range(len(b2))]\n        H.append(h); L.append(l)\n    return H, L\n\ndef softmax(l):\n    m = max(l); e = [math.exp(v - m) for v in l]; s = sum(e)\n    return [v / s for v in e]\n\ndef loss_acc(L, Y):\n    tot = 0.0; hit = 0\n    for l, y in zip(L, Y):\n        p = softmax(l); tot += -math.log(p[y])\n        if max(range(len(p)), key=lambda k: p[k]) == y: hit += 1\n    return tot / len(Y), hit / len(Y)\n\ndef grads(X, Y, W1, b1, W2, b2):\n    H, L = forward(X, W1, b1, W2, b2)\n    n, din, dh, K = len(Y), len(W1), len(b1), l… (6362 chars)\n/bin/bash: line 51: warning: here-document at line 1 delimited by end-of-file (wanted `PYEOF')\n  File \"<stdin>\", line 50\n    n, din, dh, K = len(Y), len(W1), len(b1), l… (6362 chars)\n                                               ^\nSyntaxError: invalid character '…' (U+2026)\nexit code: 1"
+        },
+        {
+          "attempt": 2,
+          "status": "PASS",
+          "exitCode": 0,
+          "timedOut": false,
+          "durationMs": 106,
+          "startedAt": "2026-11-19T10:57:58.795Z",
+          "journalRef": "bclhxr5o",
+          "note": "exit 0 + 1 output assertion(s) satisfied",
+          "output": "$ python3 knowledge/verification/sandbox/VRUN-000003/c4_protocol.py healthy 4\nC4a FD-gradient-check max-rel-err=2.187e-09 (dh=4)\nC4a step0 loss=1.779646 (~ln4=1.386294) acc=0.0PCT\nC4a final loss=0.003293 acc=100.0PCT steps=400 lr=0.5 dh=4\nC4a-PROTOCOL-PASS\nC4a-HEALTHY-PIPELINE-VERIFIED\nexit code: 0"
+        }
+      ]
+    },
+    {
+      "id": "VTC-000012",
+      "name": "C4b label-misaligned copy must FAIL the protocol (negative control)",
+      "objective": "same architecture at task-matched capacity on independently shuffled labels: protocol escalation (4x steps, raised LR) still fails the pass bar -> mechanical bug correctly flagged",
+      "category": "negative",
+      "round": 1,
+      "critical": true,
+      "expected": {
+        "expectedResult": "C4b-MECHANICAL-BUG-CORRECTLY-FLAGGED",
+        "successCriteria": "exit 0, accuracy stays below 100% and/or loss above 0.1*ln(4) after escalation",
+        "failureCriteria": "shuffled labels pass the protocol bar (discriminating power broken at task-matched capacity)"
+      },
+      "criteria": {
+        "exitCode": 0,
+        "outputContains": [
+          "C4b-MECHANICAL-BUG-CORRECTLY-FLAGGED"
+        ],
+        "outputNotContains": []
+      },
+      "command": "python3 knowledge/verification/sandbox/VRUN-000003/c4_protocol.py shuffled 4",
+      "finalStatus": "PASS",
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "FAIL",
+          "exitCode": 1,
+          "timedOut": false,
+          "durationMs": 161,
+          "startedAt": "2026-11-19T10:51:37.619Z",
+          "journalRef": "nwgurkmd",
+          "note": "exit code 1 ≠ expected 0",
+          "output": "$ python3 - shuffled 4 <<'PYEOF'\nimport math, random, sys\n\n# C4 protocol core: pure-python MLP 6 -> dh(ReLU) -> 4, CE loss, SGD.\n# Modes:\n#   healthy  DH        - FD gradient check + 400 steps @ lr 0.5. Protocol must PASS.\n#   shuffled 4         - misaligned labels, protocol escalation (1600 total, lr 1.0).\n#                        Protocol must FAIL -> mechanical bug correctly flagged.\n#   boundary 16        - EXCESS capacity at the SAME budget as healthy (400 @ 0.5):\n#                        misaligned labels get fully memorized -> documents the\n#                        capacity boundary of the protocol's inference.\ndef gen_data(seed=42, n=12, din=6, K=4):\n    rng = random.Random(seed)\n    centers = [[rng.uniform(-1, 1) for _ in range(din)] for _ in range(K)]\n    X, Y = [], []\n    for i in range(n):\n        c = i % K\n        X.append([centers[c][j] + rng.gauss(0, 0.25) for j in range(din)])\n        Y.append(c)\n    return X, Y\n\ndef init_net(seed=7, din=6, dh=4, K=4):\n    rng = random.Random(seed)\n    W1 = [[rng.gauss(0, math.sqrt(2.0 / din)) for _ in range(dh)] for _ in range(din)]\n    b1 = [0.0] * dh\n    W2 = [[rng.gauss(0, math.sqrt(2.0 / dh)) for _ in range(K)] for _ in range(dh)]\n    b2 = [0.0] * K\n    return W1, b1, W2, b2\n\ndef forward(X, W1, b1, W2, b2):\n    H, L = [], []\n    for x in X:\n        h = [max(0.0, sum(x[i] * W1[i][j] for i in range(len(x))) + b1[j]) for j in range(len(b1))]\n        l = [sum(h[j] * W2[j][k] for j in range(len(h))) + b2[k] for k in range(len(b2))]\n        H.append(h); L.append(l)\n    return H, L\n\ndef softmax(l):\n    m = max(l); e = [math.exp(v - m) for v in l]; s = sum(e)\n    return [v / s for v in e]\n\ndef loss_acc(L, Y):\n    tot = 0.0; hit = 0\n    for l, y in zip(L, Y):\n        p = softmax(l); tot += -math.log(p[y])\n        if max(range(len(p)), key=lambda k: p[k]) == y: hit += 1\n    return tot / len(Y), hit / len(Y)\n\ndef grads(X, Y, W1, b1, W2, b2):\n    H, L = forward(X, W1, b1, W2, b2)\n    n, din, dh, K = len(Y), len(W1), len(b1), … (6363 chars)\n/bin/bash: line 51: warning: here-document at line 1 delimited by end-of-file (wanted `PYEOF')\n  File \"<stdin>\", line 50\n    n, din, dh, K = len(Y), len(W1), len(b1), … (6363 chars)\n                                              ^\nSyntaxError: invalid character '…' (U+2026)\nexit code: 1"
+        },
+        {
+          "attempt": 2,
+          "status": "PASS",
+          "exitCode": 0,
+          "timedOut": false,
+          "durationMs": 215,
+          "startedAt": "2026-11-19T10:57:59.106Z",
+          "journalRef": "zlqcmj54",
+          "note": "exit 0 + 1 output assertion(s) satisfied",
+          "output": "$ python3 knowledge/verification/sandbox/VRUN-000003/c4_protocol.py shuffled 4\nC4b mechanical bug: labels shuffled independently of inputs (dh=4, task-matched)\nC4b phase1 (400 steps, lr 0.5): loss=0.191832 acc=91.7PCT\nC4b phase2 (1600 total steps, lr 1.0): loss=0.162318 acc=91.7PCT\nC4b chance floor ln(4)=1.386294; protocol pass bar: acc=100PCT and loss<0.1*lnK=0.138629\nC4b-PROTOCOL-FAIL-DETECTED\nC4b-MECHANICAL-BUG-CORRECTLY-FLAGGED\nexit code: 0"
+        }
+      ]
+    },
+    {
+      "id": "VTC-000013",
+      "name": "C4c capacity boundary: excess capacity memorizes misaligned labels",
+      "objective": "at dh=16 (excess capacity) the SAME budget that the healthy run uses fully memorizes shuffled labels — the protocol's failure->mechanical-bug inference requires task-matched capacity (validates the record's own limitation note about reducing width)",
+      "category": "boundary",
+      "round": 1,
+      "critical": true,
+      "expected": {
+        "expectedResult": "C4c-CAPACITY-BOUNDARY-DOCUMENTED",
+        "successCriteria": "exit 0, shuffled labels reach 100% accuracy and loss < 0.1 at dh=16 within the healthy budget",
+        "failureCriteria": "boundary behavior does not reproduce (result would still be reported honestly)"
+      },
+      "criteria": {
+        "exitCode": 0,
+        "outputContains": [
+          "C4c-CAPACITY-BOUNDARY-DOCUMENTED"
+        ],
+        "outputNotContains": []
+      },
+      "command": "python3 knowledge/verification/sandbox/VRUN-000003/c4_protocol.py boundary 16",
+      "finalStatus": "PASS",
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "FAIL",
+          "exitCode": 1,
+          "timedOut": false,
+          "durationMs": 149,
+          "startedAt": "2026-11-19T10:51:37.905Z",
+          "journalRef": "plnf095j",
+          "note": "exit code 1 ≠ expected 0",
+          "output": "$ python3 - boundary 16 <<'PYEOF'\nimport math, random, sys\n\n# C4 protocol core: pure-python MLP 6 -> dh(ReLU) -> 4, CE loss, SGD.\n# Modes:\n#   healthy  DH        - FD gradient check + 400 steps @ lr 0.5. Protocol must PASS.\n#   shuffled 4         - misaligned labels, protocol escalation (1600 total, lr 1.0).\n#                        Protocol must FAIL -> mechanical bug correctly flagged.\n#   boundary 16        - EXCESS capacity at the SAME budget as healthy (400 @ 0.5):\n#                        misaligned labels get fully memorized -> documents the\n#                        capacity boundary of the protocol's inference.\ndef gen_data(seed=42, n=12, din=6, K=4):\n    rng = random.Random(seed)\n    centers = [[rng.uniform(-1, 1) for _ in range(din)] for _ in range(K)]\n    X, Y = [], []\n    for i in range(n):\n        c = i % K\n        X.append([centers[c][j] + rng.gauss(0, 0.25) for j in range(din)])\n        Y.append(c)\n    return X, Y\n\ndef init_net(seed=7, din=6, dh=4, K=4):\n    rng = random.Random(seed)\n    W1 = [[rng.gauss(0, math.sqrt(2.0 / din)) for _ in range(dh)] for _ in range(din)]\n    b1 = [0.0] * dh\n    W2 = [[rng.gauss(0, math.sqrt(2.0 / dh)) for _ in range(K)] for _ in range(dh)]\n    b2 = [0.0] * K\n    return W1, b1, W2, b2\n\ndef forward(X, W1, b1, W2, b2):\n    H, L = [], []\n    for x in X:\n        h = [max(0.0, sum(x[i] * W1[i][j] for i in range(len(x))) + b1[j]) for j in range(len(b1))]\n        l = [sum(h[j] * W2[j][k] for j in range(len(h))) + b2[k] for k in range(len(b2))]\n        H.append(h); L.append(l)\n    return H, L\n\ndef softmax(l):\n    m = max(l); e = [math.exp(v - m) for v in l]; s = sum(e)\n    return [v / s for v in e]\n\ndef loss_acc(L, Y):\n    tot = 0.0; hit = 0\n    for l, y in zip(L, Y):\n        p = softmax(l); tot += -math.log(p[y])\n        if max(range(len(p)), key=lambda k: p[k]) == y: hit += 1\n    return tot / len(Y), hit / len(Y)\n\ndef grads(X, Y, W1, b1, W2, b2):\n    H, L = forward(X, W1, b1, W2, b2)\n    n, din, dh, K = len(Y), len(W1), len(b1),… (6364 chars)\n/bin/bash: line 51: warning: here-document at line 1 delimited by end-of-file (wanted `PYEOF')\n  File \"<stdin>\", line 50\n    n, din, dh, K = len(Y), len(W1), len(b1),… (6364 chars)\n                                             ^\nSyntaxError: invalid character '…' (U+2026)\nexit code: 1"
+        },
+        {
+          "attempt": 2,
+          "status": "PASS",
+          "exitCode": 0,
+          "timedOut": false,
+          "durationMs": 195,
+          "startedAt": "2026-11-19T10:57:59.474Z",
+          "journalRef": "0hl9rxip",
+          "note": "exit 0 + 1 output assertion(s) satisfied",
+          "output": "$ python3 knowledge/verification/sandbox/VRUN-000003/c4_protocol.py boundary 16\nC4c excess capacity: SAME budget as healthy (400 steps, lr 0.5) but dh=16 on misaligned labels\nC4c final loss=0.023197 acc=100.0PCT steps=400 lr=0.5 dh=16\nC4c-EXCESS-CAPACITY-MEMORIZES-SHUFFLED\nC4c-CAPACITY-BOUNDARY-DOCUMENTED\nexit code: 0"
+        }
+      ]
+    },
+    {
+      "id": "VTC-000014",
+      "name": "C5 fixed loss threshold is scale-dependent (false-fails large-scale MSE)",
+      "objective": "identical regression problems at target scale 1 vs 1000, both fitted to the noise floor: fixed loss<1e-2 gives opposite verdicts; scale-relative criteria (R2) are consistent",
+      "category": "boundary",
+      "round": 1,
+      "critical": true,
+      "expected": {
+        "expectedResult": "C5-SCALE-RELATIVE-CRITERIA-REQUIRED",
+        "successCriteria": "exit 0, fixed threshold verdicts differ across scales while R2>0.99 both",
+        "failureCriteria": "fixed threshold holds across scales or relative criteria disagree"
+      },
+      "criteria": {
+        "exitCode": 0,
+        "outputContains": [
+          "C5-SCALE-RELATIVE-CRITERIA-REQUIRED"
+        ],
+        "outputNotContains": []
+      },
+      "command": "python3 - <<'PYEOF'\nimport math, random, sys\n\n# Fixed absolute thresholds are invalid across target scales. Two identical\n# regression problems differing ONLY in target scale (1x vs 1000x): the whole\n# target (signal AND noise) is scaled. Both are fitted to their irreducible\n# noise floor by exact least squares - i.e. both are \"fully memorized\" in the\n# sense that no model can beat the noise floor.\nrng = random.Random(2024)\n\ndef make_data(scale):\n    xs, ys = [], []\n    for i in range(40):\n        x = rng.uniform(0, 1)\n        y = (3.0 * x + rng.gauss(0, 0.01)) * scale\n        xs.append(x); ys.append(y)\n    return xs, ys\n\ndef fit_least_squares(xs, ys):\n    n = len(xs)\n    mx = sum(xs) / n; my = sum(ys) / n\n    sxx = sum((x - mx) ** 2 for x in xs)\n    sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))\n    w = sxy / sxx\n    b = my - w * mx\n    return w, b\n\ndef mse_and_r2(xs, ys, w, b):\n    n = len(xs)\n    mse = sum((y - (w * x + b)) ** 2 for x, y in zip(xs, ys)) / n\n    var = sum((y - (sum(ys) / n)) ** 2 for y in ys) / n\n    return mse, 1.0 - mse / var\n\nresults = {}\nfor name, scale in ((\"scale1\", 1.0), (\"scale1000\", 1000.0)):\n    xs, ys = make_data(scale)\n    w, b = fit_least_squares(xs, ys)\n    mse, r2 = mse_and_r2(xs, ys, w, b)\n    results[name] = (mse, r2)\n    fixed = \"PASS\" if mse < 1e-2 else \"FAIL\"\n    print(f\"C5 {name}: MSE={mse:.6f} R2={r2:.6f} fixed-threshold(loss<1e-2)={fixed}\")\n\nfixed_scale1 = results[\"scale1\"][0] < 1e-2\nfixed_scale1000 = results[\"scale1000\"][0] < 1e-2\nrel_ok = results[\"scale1\"][1] > 0.99 and results[\"scale1000\"][1] > 0.99\n\nopposite = fixed_scale1 != fixed_scale1000\nprint(f\"C5 fixed-threshold verdicts differ across scales: {opposite}\")\nprint(f\"C5 scale-relative (R2>0.99) verdicts consistent: {rel_ok}\")\nok = opposite and rel_ok\nprint(\"C5-FIXED-THRESHOLD-SCALE-DEPENDENT\" if opposite else \"C5-FIXED-THRESHOLD-HELD\")\nprint(\"C5-SCALE-RELATIVE-CRITERIA-REQUIRED\" if ok else \"C5-FAILED\")\nsys.exit(0 if ok else 1)\nPYEOF",
+      "finalStatus": "PASS",
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "PASS",
+          "exitCode": 0,
+          "timedOut": false,
+          "durationMs": 96,
+          "startedAt": "2026-11-19T10:51:38.143Z",
+          "journalRef": "jckhtq8g",
+          "note": "exit 0 + 1 output assertion(s) satisfied",
+          "output": "$ python3 - <<'PYEOF'\nimport math, random, sys\n\n# Fixed absolute thresholds are invalid across target scales. Two identical\n# regression problems differing ONLY in target scale (1x vs 1000x): the whole\n# target (signal AND noise) is scaled. Both are fitted to their irreducible\n# noise floor by exact least squares - i.e. both are \"fully memorized\" in the\n# sense that no model can beat the noise floor.\nrng = random.Random(2024)\n\ndef make_data(scale):\n    xs, ys = [], []\n    for i in range(40):\n        x = rng.uniform(0, 1)\n        y = (3.0 * x + rng.gauss(0, 0.01)) * scale\n        xs.append(x); ys.append(y)\n    return xs, ys\n\ndef fit_least_squares(xs, ys):\n    n = len(xs)\n    mx = sum(xs) / n; my = sum(ys) / n\n    sxx = sum((x - mx) ** 2 for x in xs)\n    sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))\n    w = sxy / sxx\n    b = my - w * mx\n    return w, b\n\ndef mse_and_r2(xs, ys, w, b):\n    n = len(xs)\n    mse = sum((y - (w * x + b)) ** 2 for x, y in zip(xs, ys)) / n\n    var = sum((y - (sum(ys) / n)) ** 2 for y in ys) / n\n    return mse, 1.0 - mse / var\n\nresults = {}\nfor name, scale in ((\"scale1\", 1.0), (\"scale1000\", 1000.0)):\n    xs, ys = make_data(scale)\n    w, b = fit_least_squares(xs, ys)\n    mse, r2 = mse_and_r2(xs, ys, w, b)\n    results[name] = (mse, r2)\n    fixed = \"PASS\" if mse < 1e-2 else \"FAIL\"\n    print(f\"C5 {name}: MSE={mse:.6f} R2={r2:.6f} fixed-threshold(loss<1e-2)={fixed}\")\n\nfixed_scale1 = results[\"scale1\"][0] < 1e-2\nfixed_scale1000 = results[\"scale1000\"][0] < 1e-2\nrel_ok = results[\"scale1\"][1] > 0.99 and results[\"scale1000\"][1] > 0.99\n\nopposite = fixed_scale1 != fixed_scale1000\nprint(f\"C5 fixed-threshold verdicts differ across scales: {opposite}\")\nprint(f\"C5 scale-relative (R2>0.99) verdicts consistent: {rel_ok}\")\nok = opposite and rel_ok\nprint(\"C5-FIXED-THRESHOLD-SCALE-DEPENDENT\" if opposite else \"C5-FIXED-THRESHOLD-HELD\")\nprint(\"C5-SCALE-RELATIVE-CRITERIA-REQUIRED\" if ok else \"C5-FAILED\")\nsys.exit(0 if ok else 1)\nPYEOF\nC5 scale1: MSE=0.000121 R2=0.999795 fixed-threshold(loss<1e-2)=PASS\nC5 scale1000: MSE=98.599659 R2=0.999859 fixed-threshold(loss<1e-2)=FAIL\nC5 fixed-threshold verdicts differ across scales: True\nC5 scale-relative (R2>0.99) verdicts consistent: True\nC5-FIXED-THRESHOLD-SCALE-DEPENDENT\nC5-SCALE-RELATIVE-CRITERIA-REQUIRED\nexit code: 0"
+        }
+      ]
+    },
+    {
+      "id": "VTC-000015",
+      "name": "C6 zero grads are normal: naive all-nonzero assertion is a false-positive generator",
+      "objective": "healthy memorizing pipeline with dead ReLU units carries exactly-zero grads; the naive assertion fails while the correct assertion (no NaN/Inf + per-layer nonzero) passes",
+      "category": "negative",
+      "round": 1,
+      "critical": true,
+      "expected": {
+        "expectedResult": "C6-ZERO-GRADS-NORMAL-CONFIRMED",
+        "successCriteria": "exit 0, training reaches 100% acc with zero-grad weights present, naive assertion fails, correct assertion passes",
+        "failureCriteria": "no zero grads in a healthy pipeline or naive assertion passes"
+      },
+      "criteria": {
+        "exitCode": 0,
+        "outputContains": [
+          "C6-ZERO-GRADS-NORMAL-CONFIRMED"
+        ],
+        "outputNotContains": []
+      },
+      "command": "python3 knowledge/verification/sandbox/VRUN-000003/c6_zero_grads.py",
+      "finalStatus": "PASS",
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "FAIL",
+          "exitCode": 1,
+          "timedOut": false,
+          "durationMs": 147,
+          "startedAt": "2026-11-19T10:51:38.327Z",
+          "journalRef": "bmofjvyl",
+          "note": "exit code 1 ≠ expected 0",
+          "output": "$ python3 - <<'PYEOF'\nimport math, random, sys\n\n# Zero gradients on individual parameters are NORMAL in a healthy pipeline\n# (dead ReLU units); asserting all-non-zero grads is a false-positive machine.\ndef gen_data(seed=42, n=12, din=6, K=4):\n    rng = random.Random(seed)\n    centers = [[rng.uniform(-1, 1) for _ in range(din)] for _ in range(K)]\n    X, Y = [], []\n    for i in range(n):\n        c = i % K\n        X.append([centers[c][j] + rng.gauss(0, 0.25) for j in range(din)])\n        Y.append(c)\n    return X, Y\n\ndef init_net(seed=7, din=6, dh=16, K=4):\n    # dead_bias: half the hidden units start with a strongly negative bias and\n    # never activate on this tiny batch -> exactly-zero grads, by construction\n    rng = random.Random(seed)\n    W1 = [[rng.gauss(0, math.sqrt(2.0 / din)) for _ in range(dh)] for _ in range(din)]\n    b1 = [-3.0 if j >= dh // 2 else 0.0 for j in range(dh)]\n    W2 = [[rng.gauss(0, math.sqrt(2.0 / dh)) for _ in range(K)] for _ in range(dh)]\n    b2 = [0.0] * K\n    return W1, b1, W2, b2\n\ndef forward(X, W1, b1, W2, b2):\n    H, L = [], []\n    for x in X:\n        h = [max(0.0, sum(x[i] * W1[i][j] for i in range(len(x))) + b1[j]) for j in range(len(b1))]\n        l = [sum(h[j] * W2[j][k] for j in range(len(h))) + b2[k] for k in range(len(b2))]\n        H.append(h); L.append(l)\n    return H, L\n\ndef softmax(l):\n    m = max(l); e = [math.exp(v - m) for v in l]; s = sum(e)\n    return [v / s for v in e]\n\ndef loss_acc(L, Y):\n    tot = 0.0; hit = 0\n    for l, y in zip(L, Y):\n        p = softmax(l); tot += -math.log(p[y])\n        if max(range(len(p)), key=lambda k: p[k]) == y: hit += 1\n    return tot / len(Y), hit / len(Y)\n\ndef grads(X, Y, W1, b1, W2, b2):\n    H, L = forward(X, W1, b1, W2, b2)\n    n, din, dh, K = len(Y), len(W1), len(b1), len(b2)\n    P = [softmax(l) for l in L]\n    dW1 = [[0.0] * dh for _ in range(din)]; db1 = [0.0] * dh\n    dW2 = [[0.0] * K for _ in range(dh)]; db2 = [0.0] * K\n    for s in range(n):\n        dl = [P[s][k] - (1.0 if k == Y[s] e… (4389 chars)\n/bin/bash: line 52: warning: here-document at line 1 delimited by end-of-file (wanted `PYEOF')\n  File \"<stdin>\", line 51\n    dl = [P[s][k] - (1.0 if k == Y[s] e… (4389 chars)\n                                       ^\nSyntaxError: invalid character '…' (U+2026)\nexit code: 1"
+        },
+        {
+          "attempt": 2,
+          "status": "PASS",
+          "exitCode": 0,
+          "timedOut": false,
+          "durationMs": 232,
+          "startedAt": "2026-11-19T10:57:59.923Z",
+          "journalRef": "2k5n0i0k",
+          "note": "exit 0 + 1 output assertion(s) satisfied",
+          "output": "$ python3 knowledge/verification/sandbox/VRUN-000003/c6_zero_grads.py\nC6 training with dead-biased init: final loss=0.000900 acc=100.0PCT\nC6 dead hidden units on this batch=8 of 16\nC6 zero-grad weights=80 of 160\nC6 naive all-nonzero-grad assertion: FAIL (false positive)\nC6 correct assertion (no NaN/Inf + every trainable layer has nonzero grad): PASS\nC6-ZERO-GRADS-NORMAL-CONFIRMED\nexit code: 0"
+        }
+      ]
+    },
+    {
+      "id": "VTC-000016",
+      "name": "C3 doc-based: PyTorch CrossEntropyLoss logits/dtype expectations (live fetch)",
+      "objective": "inspect the ACTUAL official PyTorch documentation from the user's machine: CE input must be unnormalized logits; target dtype long for class indices (record claims these are doc-verifiable per framework version)",
+      "category": "validation",
+      "round": 1,
+      "critical": true,
+      "expected": {
+        "expectedResult": "C3-DOC-VERIFIED with DOC-SOURCE, DOC-VERSION and quoted sentences",
+        "successCriteria": "exit 0, all three documented phrases found in the fetched page, marker printed",
+        "failureCriteria": "doc fetch fails or the documented statements differ from the record's claim"
+      },
+      "criteria": {
+        "exitCode": 0,
+        "outputContains": [
+          "C3-DOC-VERIFIED"
+        ],
+        "outputNotContains": []
+      },
+      "command": "bash knowledge/verification/sandbox/VRUN-000003/c3_pytorch_doc.sh",
+      "finalStatus": "PASS",
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "FAIL",
+          "exitCode": 1,
+          "timedOut": false,
+          "durationMs": 1990,
+          "startedAt": "2026-11-19T10:51:38.565Z",
+          "journalRef": "0oazoabs",
+          "note": "exit code 1 ≠ expected 0",
+          "output": "$ #!/usr/bin/env bash\n# C3 (doc-based): inspect the ACTUAL PyTorch documentation for CrossEntropyLoss\n# label-dtype and raw-logits expectations. Resolves the current stable version\n# from the official redirect, fetches that exact versioned page, and asserts\n# the documented statements. Executed on the user's machine through the bridge.\nset -u\nSTABLE='https://pytorch.org/docs/stable/generated/torch.nn.CrossEntropyLoss.html'\nREDIR=$(curl -sL --max-time 25 \"$STABLE\") || { echo \"C3-DOC-FETCH-FAILED: $STABLE\"; exit 1; }\nVER=$(printf '%s' \"$REDIR\" | grep -oE '[0-9]+\\.[0-9]+/generated' | head -1 | cut -d/ -f1)\nif [ -z \"$VER\" ]; then echo \"C3-DOC-VERSION-RESOLVE-FAILED\"; exit 1; fi\nURL=\"https://pytorch.org/docs/$VER/generated/torch.nn.CrossEntropyLoss.html\"\nTMPF=$(mktemp)\ncurl -sL --max-time 30 \"$URL\" -o \"$TMPF\" || { echo \"C3-DOC-FETCH-FAILED: $URL\"; rm -f \"$TMPF\"; exit 1; }\npython3 - \"$TMPF\" \"$VER\" \"$URL\" <<'PYEOF'\nimport sys, re, html\npath, ver, url = sys.argv[1], sys.argv[2], sys.argv[3]\nraw = open(path, encoding='utf-8', errors='replace').read()\ntext = html.unescape(re.sub(r'\\s+', ' ', re.sub(r'<[^>]+>', ' ', raw)))\nchecks = {\n    'raw-logits-expected': 'unnormalized logits for each class',\n    'target-dtype-long': 'The target data type is required to be',\n    'class-indices-context': 'when using class indices',\n}\nprint('DOC-SOURCE:', url)\nprint('DOC-VERSION:', ver)\nok = True\nfor name, needle in checks.items():\n    found = needle in text\n    print(f'DOC-{name}:', 'FOUND' if found else 'MISSING')\n    ok = ok and found\nm = re.search(r'The target data type[^.]*\\.[^.]*\\.?', text)\nif m: print('DOC-QUOTE-dtype:', m.group(0)[:320])\nm2 = re.search(r'[^.]{0,200}unnormalized logits for each class[^.]*\\.', text)\nif m2: print('DOC-QUOTE-logits:', m2.group(0)[:320])\nm3 = re.search(r'[^.]{0,120}class probabilities only when[^.]*\\.', text)\nif m3: print('DOC-QUOTE-softlabel-nuance:', m3.group(0)[:320])\nprint('C3-DOC-VERIFIED' if ok else 'C3-DOC-NOT-VERIFIED')\nsys.exit(0 if ok else 1)\nPYE… (2031 chars)\n/bin/bash: line 39: warning: here-document at line 14 delimited by end-of-file (wanted `PYEOF')\n  File \"<stdin>\", line 25\n    PYE… (2031 chars)\n       ^\nSyntaxError: invalid character '…' (U+2026)\nexit code: 1"
+        },
+        {
+          "attempt": 2,
+          "status": "PASS",
+          "exitCode": 0,
+          "timedOut": false,
+          "durationMs": 1524,
+          "startedAt": "2026-11-19T10:58:00.288Z",
+          "journalRef": "h6k0646z",
+          "note": "exit 0 + 1 output assertion(s) satisfied",
+          "output": "$ bash knowledge/verification/sandbox/VRUN-000003/c3_pytorch_doc.sh\nDOC-SOURCE: https://pytorch.org/docs/2.15/generated/torch.nn.CrossEntropyLoss.html\nDOC-VERSION: 2.15\nDOC-raw-logits-expected: FOUND\nDOC-target-dtype-long: FOUND\nDOC-class-indices-context: FOUND\nDOC-QUOTE-dtype: The target data type is required to be long when using class indices. If containing class probabilities, the target must be the same shape input, and each value should be between [ 0 , 1 ] [0, 1] [ 0 , 1 ] .\nDOC-QUOTE-logits:  The input is expected to contain the unnormalized logits for each class (which do not need to be positive or sum to 1, in general).\nDOC-QUOTE-softlabel-nuance:  Consider providing target as class probabilities only when a single class label per minibatch item is too restrictive.\nC3-DOC-VERIFIED\nexit code: 0"
+        }
+      ]
+    }
+  ],
+  "metrics": [
+    {
+      "id": "VMET-000007",
+      "runId": "VRUN-000003",
+      "testCaseId": "VTC-000009",
+      "name": "chance_ce_k2",
+      "value": "0.693147",
+      "unit": "nats",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T10:59:14.121Z"
+    },
+    {
+      "id": "VMET-000008",
+      "runId": "VRUN-000003",
+      "testCaseId": "VTC-000009",
+      "name": "chance_ce_k10",
+      "value": "2.302585",
+      "unit": "nats",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T10:59:14.121Z"
+    },
+    {
+      "id": "VMET-000009",
+      "runId": "VRUN-000003",
+      "testCaseId": "VTC-000011",
+      "name": "healthy_final_loss",
+      "value": "0.003293",
+      "unit": "nats",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T10:59:14.121Z"
+    },
+    {
+      "id": "VMET-000010",
+      "runId": "VRUN-000003",
+      "testCaseId": "VTC-000011",
+      "name": "fd_gradient_max_rel_err",
+      "value": "2.187e-09",
+      "unit": "relative",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T10:59:14.121Z"
+    },
+    {
+      "id": "VMET-000011",
+      "runId": "VRUN-000003",
+      "testCaseId": "VTC-000012",
+      "name": "shuffled_final_loss_after_escalation",
+      "value": "0.162318",
+      "unit": "nats",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T10:59:14.121Z"
+    },
+    {
+      "id": "VMET-000012",
+      "runId": "VRUN-000003",
+      "testCaseId": "VTC-000012",
+      "name": "shuffled_final_accuracy",
+      "value": "91.7",
+      "unit": "PCT",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T10:59:14.121Z"
+    },
+    {
+      "id": "VMET-000013",
+      "runId": "VRUN-000003",
+      "testCaseId": "VTC-000013",
+      "name": "excess_capacity_boundary_loss",
+      "value": "0.023197",
+      "unit": "nats",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T10:59:14.121Z"
+    },
+    {
+      "id": "VMET-000014",
+      "runId": "VRUN-000003",
+      "testCaseId": "VTC-000014",
+      "name": "mse_scale1000_at_noise_floor",
+      "value": "98.599659",
+      "unit": "squared_units",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T10:59:14.121Z"
+    },
+    {
+      "id": "VMET-000015",
+      "runId": "VRUN-000003",
+      "testCaseId": "VTC-000014",
+      "name": "r2_scale1000",
+      "value": "0.999859",
+      "unit": "fraction",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T10:59:14.121Z"
+    },
+    {
+      "id": "VMET-000016",
+      "runId": "VRUN-000003",
+      "testCaseId": "VTC-000015",
+      "name": "zero_grad_weights_in_healthy_pipeline",
+      "value": "80",
+      "unit": "of 160",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T10:59:14.121Z"
+    },
+    {
+      "id": "VMET-000017",
+      "runId": "VRUN-000003",
+      "testCaseId": "VTC-000016",
+      "name": "pytorch_doc_version_inspected",
+      "value": "2.15",
+      "unit": "version",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T10:59:14.121Z"
+    }
+  ],
+  "analyses": [
+    {
+      "id": "VANA-1-mwnftutl",
+      "round": 2,
+      "submittedBy": "GLM (z.ai web)",
+      "createdAt": "2026-11-19T10:59:14.121Z",
+      "summary": "All 8 critical cases passed against real executions on the user's machine (round 2; round 1's five failures were infrastructure failures caused by the engine's silent 2000-char command truncation — root cause fixed, mangled attempts preserved as VTA-000013/14/15/17/18). Measured: C1 chance-level CE equals ln(K) exactly for K=2 (0.693147) and K=10 (2.302585), near-one-hot CE approaches 0. C2 a constant predictor scores 100% on a single-class batch but exactly 25%/10% on class-spanning batches (K=4/10) — single-class batches void the test. C4a a finite-difference-certified healthy pure-python MLP (max grad rel-err 2.187e-09) memorizes 12 class-spanning samples in 400 steps (100% batch accuracy, loss 0.003293 vs ln(4)=1.386294 baseline). C4b the same architecture on independently shuffled labels fails the protocol even after 4x steps at raised LR (91.7% accuracy, loss 0.162318 > the 0.138629 pass bar) — mechanical bug correctly flagged. C4c at excess capacity (dh=16) the same budget fully memorizes the misaligned labels (100%, loss 0.023197) — the protocol's failure-to-overfit-implies-mechanical-bug inference requires task-matched capacity, exactly as the record's limitations prescribe. C5 a fixed loss<1e-2 threshold false-fails a fully-fitted MSE problem at target scale 1000 (MSE 98.599659, R2 0.999859) while passing scale 1 — scale-relative criteria required. C6 a healthy memorizing pipeline carries exactly-zero grads on 80 of 160 weights (8 dead ReLU units); the naive all-nonzero assertion fails while the correct no-NaN/Inf + per-layer-nonzero assertion passes. C3 the live-fetched official PyTorch 2.15 documentation states CE input is expected to be unnormalized logits and the target dtype is required to be long when using class indices.",
+      "comparison": "Every prediction in the hypothesis matched the measured outcome. Expected vs observed: ln(2)=0.693147 vs 0.693147 (exact); ln(10)=2.302585 vs 2.302585 (exact); healthy protocol pass (acc 100%, loss << 0.1*ln4=0.138629) vs measured 100%/0.003293; shuffled-labels protocol fail (acc<100% or loss>0.138629) vs measured 91.7%/0.162318 — note the honest nuance: substantial partial memorization occurs (91.7%), but the protocol's pass bar is not met, and the conclusion (hunt the mechanical bug) is correct since the labels ARE misaligned; capacity boundary at dh=16 vs measured full memorization (100%/0.023197); scale-1000 MSE floor ~100 vs measured 98.599659 with R2 0.999859 (fully fitted); zero-grad fraction ~half the weights vs measured 80/160 with training still reaching 100% accuracy.",
+      "alternativeExplanations": "(1) The shuffled-label run reaches 91.7% accuracy — with extreme budgets or excess capacity, misaligned labels CAN be fully memorized (Zhang et al. 2017); the protocol's discriminating power was demonstrated at task-matched capacity and its documented budget, and the capacity boundary is recorded as case C4c rather than hidden. (2) The initial C4 design (dh=16 for both healthy and shuffled cases) FAILED local dry-run validation — the shuffled copy passed the protocol at 400 steps — this design iteration is reported rather than suppressed and became the C4c boundary case. (3) The C3 documentation check reveals a nuance the record hedges correctly: PyTorch >=1.10 also accepts class-probability (soft-label) float targets; the record's phrase 'doc-verifiable per framework version' is accurate, and the inspected version is 2.15. (4) Round-1 failures were pure infrastructure (command truncation), evidenced by the SyntaxError outputs, not by experiment results.",
+      "recommendedModifications": "For the owner's review of EXP-000008 v3: the verified evidence supports the record's core claims. Two refinements worth considering in a future revision: (a) the limitations could cite the measured capacity boundary (excess-capacity nets memorize misaligned labels, dh=16 memorized at 400 steps) as concrete evidence for the existing 'reduce width' guidance; (b) the CrossEntropyLoss parenthetical could note that current PyTorch (2.15) also accepts class-probability float targets — the doc quote is preserved in attempt VTA-000023. Neither changes the protocol itself.",
+      "proposedConclusion": {
+        "status": "VERIFIED",
+        "summary": "All 8 critical test cases passed on real executions on the user's machine: analytic baselines exact; single-class batches void the tiny-batch test; a gradient-verified healthy pipeline passes the protocol while a label-misaligned copy fails it at task-matched capacity; the capacity boundary is documented; fixed loss thresholds are scale-dependent; zero grads are normal in healthy pipelines; and the live-fetched PyTorch 2.15 documentation confirms the logits/dtype expectations. The pure-python substitute for the DL-framework variant (original plan item C4) remains the one framework-level gap: torch is not installed on the workspace machine."
+      },
+      "engineDecision": {
+        "accepted": true,
+        "effectiveStatus": "VERIFIED",
+        "reason": "GLM's proposal matches the evidence: all 8 critical test(s) passed against real executions"
+      },
+      "metricIds": [
+        "VMET-000007",
+        "VMET-000008",
+        "VMET-000009",
+        "VMET-000010",
+        "VMET-000011",
+        "VMET-000012",
+        "VMET-000013",
+        "VMET-000014",
+        "VMET-000015",
+        "VMET-000016",
+        "VMET-000017"
+      ]
+    }
+  ],
+  "feedback": [],
+  "limitations": [
+    "Commands executed on the user's machine through the VS Code extension as the local user — no CPU/memory sandbox isolation is enforceable through this transport.",
+    "Network access for non-flagged tests could not be technically blocked; tests that declared network needs required explicit owner confirmation instead.",
+    "Attempt outputs are redacted for secrets and capped at 20,000 characters per attempt."
+  ]
+}

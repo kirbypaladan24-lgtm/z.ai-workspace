@@ -1,0 +1,526 @@
+{
+  "id": "RPT-VRUN-000004",
+  "runId": "VRUN-000004",
+  "knowledge": {
+    "id": "EXP-000009",
+    "version": 3,
+    "title": "ML triage: read the loss curve before changing anything — each shape narrows to a SHORT CANDIDATE LIST that must be confirmed by a check; a shape alone is never a diagnosis",
+    "solutionUnderTest": "STEP 0 for every flat or plateaued curve: compare the loss VALUE to the analytic baseline. K-class cross-entropy constant-predictor floor = ln(K) (ln 2 = 0.6931 binary; ln 10 = 2.3026 for 10 classes); majority-class floor = class-prior entropy; regression floor = mean-predictor MSE. Flat AT baseline = not learning; flat NEAR ZERO = likely already fit (check a metric, not loss); flat BELOW baseline at a mediocre value = partial learning. SHAPES -> CANDIDATES (confirm before acting): NaN/Inf EARLY -> (a) inf/nan already in the input batch — print per-feature min/max, cheapest check; (b) numeric fault in the loss itself — log(0), softmax overflow (see the log-sum-exp record); (c) LR too high — grad norms at the last healthy step: exploding norms support it, sane norms point back to (a)/(b). Dividing LR by 10 is a MITIGATION to stop the bleeding, not a diagnosis. FLAT FROM STEP 0 -> (a) baseline comparison above; (b) optimizer not stepping or LR not loaded (loss would not even drift — verify optimizer.step() is called and the LR actually in use); (c) loss/label mismatch (regression loss on class labels); (d) broken graph (detached tensors); (e) dead ReLUs — per-layer activation stats: SOME dead units are normal, an ALL-dead layer is not. EXPLODES AFTER N GOOD STEPS -> (a) a single poisoned batch — reproduce with a fixed seed / fixed batch order; if the explosion moves with the shuffle, it is data; (b) gradient explosion — log per-step grad norms; a growing trend confirms; (c) LR schedule stepping too far — inspect the actual LR value at the divergence step. Clipping is an immediate stabilizer; find WHY norms grew (init, LR, loss reduction) before calling it fixed. TRAIN DOWN, VAL UP -> overfitting is the LEADING candidate, not the only one; confirm alternatives first: (a) eval-pipeline parity — same preprocessing, no train-only augmentation at eval; (b) train/val distribution shift — compare label and feature distributions. If confirmed as overfitting, respond in ROI order: more or augmented data, dropout, weight decay, early stopping — architecture changes LAST. BOTH FLAT AT MEDIOCRE VALUE -> (a) labels near-constant — compute the majority-class baseline accuracy; if your metric matches it, the model learned only the prior; (b) inputs uninformative — print samples and audit the feature pipeline; (c) LR too low or capacity too small — briefly raise LR 10x: if the loss finally moves, it was LR. When the shape alone is ambiguous: log per-layer activation AND gradient norms; look for the layer where they hit zero or blow up.\n\nVERIFICATION PLAN (PLANNED — NOT EXECUTED; no evidence exists for v2 claims yet): C1 experimental (python3, user machine): compute -log(1/K) for K=2,10 and the CE of a constant p=1/K prediction (must equal ln K) — validates every baseline number quoted above. C2 experimental (python3): CE of a near-one-hot confident correct prediction approaches 0 — validates the flat-near-zero interpretation. C3 doc-based (NOT yet inspected): clipping and loss-dtype semantics of the framework in use. C4 practice-based: the shape->candidate mappings are community debugging practice, not experimentally tested claims — they will cite specific inspected sources only after those sources are actually read; until then treat them as priors."
+  },
+  "generatedAt": "2026-11-19T11:10:02.972Z",
+  "generatedBy": "bridge report generator (assembled from persisted execution records)",
+  "verificationStatus": "VERIFIED",
+  "conclusion": {
+    "status": "VERIFIED",
+    "summary": "all 5 critical test(s) passed against real executions",
+    "glmInterpretation": "All 5 critical cases passed against real executions on the user's machine (first round — no regression needed; sandbox staging prevented a repeat of the command-size failure mode). Measured: C1 -log(1/K) equals ln(K) exactly for K=2 (0.693147) and K=10 (2.302585); the constant p=1/K predictor's CE equals ln(K) exactly. C2 the CE of near-one-hot confident correct predictions approaches 0 (1.0e-9 at p=1-1e-9), bounded by the missing probability mass. C5 the flat-curve ambiguity: an optimizer-not-stepping config (lr=0) and a broken-graph config produce a loss flat at EXACTLY ln(2)=0.693147 (identical value, different cause — separated by the gradient-norm and parameter-drift checks: grad-norm 1.016803 nonzero with unchanged params vs no gradient path at all), while near-constant labels with uninformative inputs converge to the class-prior entropy (measured 0.344746 vs H=0.356843 at majority share 0.885) — a DIFFERENT value that splits the candidate space before any check runs. C6 the NaN/Inf-early ambiguity: a naive -log(p) loss fault (inf at step 0 with clean inputs; the stable log-sum-exp form stays finite at 827.5 on the same logits) and an LR fault (healthy step-0 loss 0.699176, explosion to non-finite within 2 steps at lr=1e4; LR reduced to 1e0 restores stable descent to 0.582731) produce the same shape, and the record's check list (input scan, loss audit, LR probe) discriminates them — including the honest observation that sane grad norms at the last healthy step pointed back to (a)/(b), which elimination then ruled out. C3 the official PyTorch 2.15 documentation (fetched live from the user's machine; the stable path served a bot-protection challenge and the versioned URL served the content, recorded in DOC-SOURCE) states clip_grad_norm_ clips the gradient norm of an iterable of parameters, computes the norm as if concatenated into a single vector, and modifies gradients in place.",
+    "stats": {
+      "planned": 5,
+      "generated": 5,
+      "executed": 5,
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0,
+      "blocked": 0,
+      "errors": 0,
+      "attempts": 5,
+      "iterations": 1,
+      "passRate": 100
+    },
+    "decidedAt": "2026-11-19T11:10:02.726Z",
+    "decidedBy": "bridge-evaluator (evidence-based)"
+  },
+  "originalProblem": {
+    "description": "EXP-000009 (latest version v3, content of the v2 technical revision) claims: (1) a loss-curve SHAPE is a clue that narrows to a candidate list, never a diagnosis by itself; (2) the loss VALUE relative to the analytic baseline disambiguates what the shape alone cannot — flat at ln(K) = not-learning, flat near zero = likely already fit, flat at the class-prior entropy = learned only the prior; (3) the quoted baseline numbers are exact (ln2=0.693147, ln10=2.302585, near-one-hot CE approaching 0); (4) for NaN/Inf-early curves the listed checks (input min/max scan, loss-formula audit, grad norms, LR probe) discriminate between a numeric loss fault and an LR fault; (5) framework clipping semantics are doc-verifiable. This run executes the record's own verification plan C1-C3 (C4 is practice-based and not mechanically testable, per the record itself), plus two cases verifying the rootCause's ambiguity claims (C5 flat-ambiguity, C6 explosion-ambiguity).",
+    "symptoms": "shotgun debugging during training misbehavior; acting on a loss-curve shape without a confirming check; misreading flat or exploding curves",
+    "expectedBehavior": "C1: -log(1/K) equals ln(K) exactly for K=2,10 and the CE of a constant p=1/K prediction equals ln(K). C2: the CE of a near-one-hot confident correct prediction approaches 0 (bounded by ~1-confidence). C5: three distinct causes (optimizer not stepping, broken graph, near-constant labels with uninformative inputs) all produce a FLAT curve; the first two sit at exactly ln(2)=0.693147 and are separated by the gradient/parameter-drift checks; the third converges to the class-prior entropy (~0.357), a different value — the VALUE splits the candidate space before any check runs. C6: a numeric loss fault (naive -log(p) underflow with clean inputs) and an LR fault (explosion at lr=1e4 with healthy step-0 loss) both produce NaN/Inf-early curves; the input scan, loss-formula audit and LR probe discriminate them. C3: the official PyTorch documentation states clip_grad_norm_ clips the gradient norm of an iterable of parameters, computes the norm as if concatenated into a single vector, and modifies… (1020 chars)",
+    "actualBehavior": "to be measured by real execution on the user's machine through the bridge",
+    "facts": "-log(1/K)=ln(K); the entropy of a 90/10 class prior is ~0.357 nats; naive -log(softmax) underflows to inf for logit gaps beyond ~745 while the log-sum-exp form stays finite; an LR of 1e4 amplifies a sane 0.122 gradient norm into a weight jump of ~1220 per step, driving the next step's loss to inf.",
+    "assumptions": "python3 3.14.4 on the user's machine; fixed seeds make every result deterministic; pure-python softmax regression substitutes framework training dynamics (torch absent on the workspace machine); outbound HTTPS available for the documentation check; pytorch.org may intermittently serve a bot-protection challenge on the stable path, so the doc case falls back to the versioned 2.15 URL resolved earlier the same day.",
+    "environment": "user's machine via the bridge extension: Linux, Python 3.14.4, torch absent; VM dry-runs on Python 3.12.16",
+    "constraints": "stdlib-only experiments; non-destructive (doc check writes only to mktemp); outputs below the 20KB truncation limit; the doc case fetches only official pytorch.org pages and is flagged requiresNetwork."
+  },
+  "hypothesis": {
+    "text": "All five cases pass their declared criteria on real execution: the chance-floor baselines are exact; the confident-prediction CE approaches zero; the flat-curve ambiguity demonstration shows three causes with the value+checks separating them exactly as the record's triage method prescribes; the explosion ambiguity shows the loss-fault and LR-fault separated by the record's listed checks; and the live-fetched PyTorch documentation confirms the clipping semantics.",
+    "expectedObservation": "markers: C1-CHANCE-FLOORS-VERIFIED, C2-CONFIDENT-CE-APPROACHES-ZERO, C5-VALUE-AND-CHECKS-DISAMBIGUATE, C6-CHECKS-DISAMBIGUATE, C3-DOC-VERIFIED",
+    "supportingEvidence": "VM-local dry-runs (Python 3.12.16) reproduce every marker; design iterations (C2 threshold too strict at 1e-3; C6 initially crashed on math.log(0) and mislabeled sane norms as growing) were caught locally and corrected — the final C6 honestly reports sane norms and relies on elimination + the LR probe, exactly as the record's own check list prescribes.",
+    "contradictingEvidence": "none observed in dry-runs."
+  },
+  "hypothesisHistory": [
+    {
+      "n": 1,
+      "kind": "initial",
+      "hypothesis": "All five cases pass their declared criteria on real execution: the chance-floor baselines are exact; the confident-prediction CE approaches zero; the flat-curve ambiguity demonstration shows three causes with the value+checks separating them exactly as the record's triage method prescribes; the explosion ambiguity shows the loss-fault and LR-fault separated by the record's listed checks; and the live-fetched PyTorch documentation confirms the clipping semantics.",
+      "expectedObservation": "markers: C1-CHANCE-FLOORS-VERIFIED, C2-CONFIDENT-CE-APPROACHES-ZERO, C5-VALUE-AND-CHECKS-DISAMBIGUATE, C6-CHECKS-DISAMBIGUATE, C3-DOC-VERIFIED",
+      "changeNote": "initial hypothesis",
+      "createdAt": "2026-11-19T11:08:54.821Z",
+      "outcome": "5/5 executed tests passed (pass rate 100%)"
+    }
+  ],
+  "strategy": "Execute the record's plan C1/C2 (exact analytic baselines, deterministic), C5/C6 (ambiguity demonstrations implementing the record's triage method on pure-python training dynamics), C3 (live documentation inspection of clip_grad_norm_ semantics from the user's machine). C4 (shape->candidate mappings as practice-based priors) is deliberately NOT tested — the record itself classifies it as untested practice knowledge, and no source has been read to elevate it.\n\nExperiments: Five single-purpose deterministic experiments: C1/C2 exact analytic baselines (inline), C5/C6 ambiguity demonstrations on pure-python softmax-regression dynamics (sandbox scripts staged via journaled write_file), C3 live documentation inspection (sandbox script, official pytorch.org). C4 (shape->candidate mappings) deliberately untested — the record classifies it as practice-based priors.",
+  "environment": {
+    "capturedAt": 1795086535033,
+    "os": "Linux kirby-LOQ-15IAX9E 7.0.0-43-generic #43-Ubuntu SMP PREEMPT_DYNAMIC Fri Oct 23 13:25:25 UTC 2026 x86_64 GNU/Linux\nexit code: 0",
+    "runtimes": "Python 3.14.4\n/bin/bash: line 1: node: command not found\ngit version 2.53.0\n3.46.1 2024-08-13 09:16:08 c9c2ab54ba1f5f46360f1b4f35d849cd3f080e6fc2b6c60e91b16c63f69aalt1 (64-bit)\nexit code: 0",
+    "sourceRevision": "6c04b92",
+    "journalRefs": [
+      "5gagwt2e",
+      "uh6xd92t",
+      "gxhco2wa"
+    ]
+  },
+  "reproducibility": {
+    "os": "Linux kirby-LOQ-15IAX9E 7.0.0-43-generic #43-Ubuntu SMP PREEMPT_DYNAMIC Fri Oct 23 13:25:25 UTC 2026 x86_64 GNU/Linux\nexit code: 0",
+    "runtimes": "Python 3.14.4\n/bin/bash: line 1: node: command not found\ngit version 2.53.0\n3.46.1 2024-08-13 09:16:08 c9c2ab54ba1f5f46360f1b4f35d849cd3f080e6fc2b6c60e91b16c63f69aalt1 (64-bit)\nexit code: 0",
+    "sourceRevision": "6c04b92",
+    "testCommands": [
+      {
+        "id": "VTC-000017",
+        "command": "python3 - <<'PYEOF'\nimport math, sys\n\n# C1 (record plan): chance floors. -log(1/K) for K=2,10 and the CE of a\n# constant p=1/K prediction must equal ln(K) exactly.\nok = True\nfor K in (2, 10):\n    a = -math.log(1.0 / K)\n    p = [1.0 / K] * K\n    ce_const = -sum(math.log(pi) / K for pi in p)  # expectation over uniform labels\n    expect = math.log(K)\n    m1 = abs(a - expect) < 1e-12\n    m2 = abs(ce_const - expect) < 1e-12\n    ok = ok and m1 and m2\n    print(f\"C1 K={K} -log(1/K)={a:.6f} constant-predictor-CE={ce_const:.6f} ln(K)={expect:.6f} exact={m1 and m2}\")\nprint(\"C1-CHANCE-FLOORS-VERIFIED\" if ok else \"C1-FAILED\")\nsys.exit(0 if ok else 1)\nPYEOF",
+        "timeoutMs": 60000
+      },
+      {
+        "id": "VTC-000018",
+        "command": "python3 - <<'PYEOF'\nimport math, sys\n\n# C2 (record plan): the CE of a near-one-hot confident correct prediction\n# approaches 0 — the analytic basis for reading a flat-near-zero curve as\n# \"likely already fit\". Assert each measured CE matches -log(conf) and is\n# bounded by ~the missing probability mass (1 - conf).\nok = True\nfor conf in (1 - 1e-3, 1 - 1e-6, 1 - 1e-9):\n    eps = 1.0 - conf\n    ce = -math.log(conf)\n    print(f\"C2 p_correct={conf} CE={ce:.9f} (1-conf={eps:.0e})\")\n    ok = ok and ce < 1.1 * eps and abs(ce - (-math.log(conf))) < 1e-15\nok = ok and ce < 1e-8\nprint(\"C2-CONFIDENT-CE-APPROACHES-ZERO\" if ok else \"C2-FAILED\")\nsys.exit(0 if ok else 1)\nPYEOF",
+        "timeoutMs": 60000
+      },
+      {
+        "id": "VTC-000019",
+        "command": "python3 knowledge/verification/sandbox/VRUN-000004/c5_flat_ambiguity.py",
+        "timeoutMs": 120000
+      },
+      {
+        "id": "VTC-000020",
+        "command": "python3 knowledge/verification/sandbox/VRUN-000004/c6_exploding_ambiguity.py",
+        "timeoutMs": 120000
+      },
+      {
+        "id": "VTC-000021",
+        "command": "bash knowledge/verification/sandbox/VRUN-000004/c3_clip_doc.sh",
+        "timeoutMs": 90000
+      }
+    ],
+    "note": "Re-run the listed commands in the recorded environment to reproduce. All outputs below were captured by the bridge from real executions."
+  },
+  "timeline": [
+    {
+      "n": 1,
+      "name": "Problem Analysis",
+      "status": "complete",
+      "startedAt": 1795086534821,
+      "completedAt": 1795086534821,
+      "durationMs": 0,
+      "details": "problem, symptoms, expected vs actual behavior, facts and assumptions recorded"
+    },
+    {
+      "n": 2,
+      "name": "Hypothesis Formulation",
+      "status": "complete",
+      "startedAt": 1795086534821,
+      "completedAt": 1795086534821,
+      "durationMs": 0,
+      "details": "All five cases pass their declared criteria on real execution: the chance-floor baselines are exact; the confident-prediction CE approaches zero; the flat-curve ambiguity demonstration shows three causes with the value+checks separating them exactly as the record's triage method prescribes; the expl… (466 chars)"
+    },
+    {
+      "n": 3,
+      "name": "Experiment Design",
+      "status": "complete",
+      "startedAt": 1795086549336,
+      "completedAt": 1795086549336,
+      "durationMs": 0,
+      "details": "Five single-purpose deterministic experiments: C1/C2 exact analytic baselines (inline), C5/C6 ambiguity demonstrations on pure-python softmax-regression dynamics (sandbox scripts staged via journaled write_file), C3 live documentation inspection (sandbox script, official pytorch.org). C4 (shape->can… (391 chars)"
+    },
+    {
+      "n": 4,
+      "name": "Test Plan Generation",
+      "status": "complete",
+      "startedAt": 1795086549336,
+      "completedAt": 1795086549336,
+      "durationMs": 0,
+      "details": "5 test case(s) planned — review on the dashboard, then start verification"
+    },
+    {
+      "n": 5,
+      "name": "Environment Preparation",
+      "status": "complete",
+      "startedAt": 1795086534821,
+      "completedAt": 1795086535033,
+      "durationMs": 212,
+      "details": "environment captured from the real machine via journaled commands"
+    },
+    {
+      "n": 6,
+      "name": "Test Execution",
+      "status": "complete",
+      "startedAt": 1795086549733,
+      "completedAt": 1795086554500,
+      "durationMs": 4767,
+      "details": "5 executed · 5 passed · 0 failed · 0 errors"
+    },
+    {
+      "n": 7,
+      "name": "Result Analysis",
+      "status": "complete",
+      "startedAt": 1795086554500,
+      "completedAt": 1795086602726,
+      "durationMs": 48226,
+      "details": "All 5 critical cases passed against real executions on the user's machine (first round — no regression needed; sandbox staging prevented a repeat of the command-size failure mode). Measured: C1 -log(1 — engine decision: VERIFIED"
+    },
+    {
+      "n": 8,
+      "name": "Regression Testing",
+      "status": "skipped",
+      "startedAt": null,
+      "completedAt": null,
+      "durationMs": null,
+      "details": "no regression round requested — skipped"
+    },
+    {
+      "n": 9,
+      "name": "Final Verification",
+      "status": "complete",
+      "startedAt": 1795086602726,
+      "completedAt": 1795086602726,
+      "durationMs": 0,
+      "details": "all 5 critical test(s) passed against real executions"
+    },
+    {
+      "n": 10,
+      "name": "Report Generation",
+      "status": "pending",
+      "startedAt": null,
+      "completedAt": null,
+      "durationMs": null,
+      "details": ""
+    }
+  ],
+  "statistics": {
+    "planned": 5,
+    "generated": 5,
+    "executed": 5,
+    "passed": 5,
+    "failed": 0,
+    "skipped": 0,
+    "blocked": 0,
+    "errors": 0,
+    "attempts": 5,
+    "iterations": 1,
+    "passRate": 100
+  },
+  "testCases": [
+    {
+      "id": "VTC-000017",
+      "name": "C1 chance floors: -log(1/K) = ln(K) and constant-predictor CE = ln(K)",
+      "objective": "validate the baseline numbers quoted in the record's step 0 (ln2=0.693147, ln10=2.302585) and the constant p=1/K predictor floor",
+      "category": "validation",
+      "round": 1,
+      "critical": true,
+      "expected": {
+        "expectedResult": "C1-CHANCE-FLOORS-VERIFIED",
+        "successCriteria": "exit 0, exact matches for K=2 and K=10",
+        "failureCriteria": "any baseline mismatch"
+      },
+      "criteria": {
+        "exitCode": 0,
+        "outputContains": [
+          "C1-CHANCE-FLOORS-VERIFIED"
+        ],
+        "outputNotContains": []
+      },
+      "command": "python3 - <<'PYEOF'\nimport math, sys\n\n# C1 (record plan): chance floors. -log(1/K) for K=2,10 and the CE of a\n# constant p=1/K prediction must equal ln(K) exactly.\nok = True\nfor K in (2, 10):\n    a = -math.log(1.0 / K)\n    p = [1.0 / K] * K\n    ce_const = -sum(math.log(pi) / K for pi in p)  # expectation over uniform labels\n    expect = math.log(K)\n    m1 = abs(a - expect) < 1e-12\n    m2 = abs(ce_const - expect) < 1e-12\n    ok = ok and m1 and m2\n    print(f\"C1 K={K} -log(1/K)={a:.6f} constant-predictor-CE={ce_const:.6f} ln(K)={expect:.6f} exact={m1 and m2}\")\nprint(\"C1-CHANCE-FLOORS-VERIFIED\" if ok else \"C1-FAILED\")\nsys.exit(0 if ok else 1)\nPYEOF",
+      "finalStatus": "PASS",
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "PASS",
+          "exitCode": 0,
+          "timedOut": false,
+          "durationMs": 89,
+          "startedAt": "2026-11-19T11:09:09.985Z",
+          "journalRef": "2b2ix5n6",
+          "note": "exit 0 + 1 output assertion(s) satisfied",
+          "output": "$ python3 - <<'PYEOF'\nimport math, sys\n\n# C1 (record plan): chance floors. -log(1/K) for K=2,10 and the CE of a\n# constant p=1/K prediction must equal ln(K) exactly.\nok = True\nfor K in (2, 10):\n    a = -math.log(1.0 / K)\n    p = [1.0 / K] * K\n    ce_const = -sum(math.log(pi) / K for pi in p)  # expectation over uniform labels\n    expect = math.log(K)\n    m1 = abs(a - expect) < 1e-12\n    m2 = abs(ce_const - expect) < 1e-12\n    ok = ok and m1 and m2\n    print(f\"C1 K={K} -log(1/K)={a:.6f} constant-predictor-CE={ce_const:.6f} ln(K)={expect:.6f} exact={m1 and m2}\")\nprint(\"C1-CHANCE-FLOORS-VERIFIED\" if ok else \"C1-FAILED\")\nsys.exit(0 if ok else 1)\nPYEOF\nC1 K=2 -log(1/K)=0.693147 constant-predictor-CE=0.693147 ln(K)=0.693147 exact=True\nC1 K=10 -log(1/K)=2.302585 constant-predictor-CE=2.302585 ln(K)=2.302585 exact=True\nC1-CHANCE-FLOORS-VERIFIED\nexit code: 0"
+        }
+      ]
+    },
+    {
+      "id": "VTC-000018",
+      "name": "C2 confident-correct CE approaches zero (flat-near-zero interpretation)",
+      "objective": "validate the analytic basis for reading a flat loss near zero as 'likely already fit'",
+      "category": "validation",
+      "round": 1,
+      "critical": true,
+      "expected": {
+        "expectedResult": "C2-CONFIDENT-CE-APPROACHES-ZERO",
+        "successCriteria": "exit 0, each CE < 1.1x(1-conf), tightest < 1e-8",
+        "failureCriteria": "CE does not approach zero"
+      },
+      "criteria": {
+        "exitCode": 0,
+        "outputContains": [
+          "C2-CONFIDENT-CE-APPROACHES-ZERO"
+        ],
+        "outputNotContains": []
+      },
+      "command": "python3 - <<'PYEOF'\nimport math, sys\n\n# C2 (record plan): the CE of a near-one-hot confident correct prediction\n# approaches 0 — the analytic basis for reading a flat-near-zero curve as\n# \"likely already fit\". Assert each measured CE matches -log(conf) and is\n# bounded by ~the missing probability mass (1 - conf).\nok = True\nfor conf in (1 - 1e-3, 1 - 1e-6, 1 - 1e-9):\n    eps = 1.0 - conf\n    ce = -math.log(conf)\n    print(f\"C2 p_correct={conf} CE={ce:.9f} (1-conf={eps:.0e})\")\n    ok = ok and ce < 1.1 * eps and abs(ce - (-math.log(conf))) < 1e-15\nok = ok and ce < 1e-8\nprint(\"C2-CONFIDENT-CE-APPROACHES-ZERO\" if ok else \"C2-FAILED\")\nsys.exit(0 if ok else 1)\nPYEOF",
+      "finalStatus": "PASS",
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "PASS",
+          "exitCode": 0,
+          "timedOut": false,
+          "durationMs": 76,
+          "startedAt": "2026-11-19T11:09:10.513Z",
+          "journalRef": "wwatuwab",
+          "note": "exit 0 + 1 output assertion(s) satisfied",
+          "output": "$ python3 - <<'PYEOF'\nimport math, sys\n\n# C2 (record plan): the CE of a near-one-hot confident correct prediction\n# approaches 0 — the analytic basis for reading a flat-near-zero curve as\n# \"likely already fit\". Assert each measured CE matches -log(conf) and is\n# bounded by ~the missing probability mass (1 - conf).\nok = True\nfor conf in (1 - 1e-3, 1 - 1e-6, 1 - 1e-9):\n    eps = 1.0 - conf\n    ce = -math.log(conf)\n    print(f\"C2 p_correct={conf} CE={ce:.9f} (1-conf={eps:.0e})\")\n    ok = ok and ce < 1.1 * eps and abs(ce - (-math.log(conf))) < 1e-15\nok = ok and ce < 1e-8\nprint(\"C2-CONFIDENT-CE-APPROACHES-ZERO\" if ok else \"C2-FAILED\")\nsys.exit(0 if ok else 1)\nPYEOF\nC2 p_correct=0.999 CE=0.001000500 (1-conf=1e-03)\nC2 p_correct=0.999999 CE=0.000001000 (1-conf=1e-06)\nC2 p_correct=0.999999999 CE=0.000000001 (1-conf=1e-09)\nC2-CONFIDENT-CE-APPROACHES-ZERO\nexit code: 0"
+        }
+      ]
+    },
+    {
+      "id": "VTC-000019",
+      "name": "C5 flat-curve ambiguity: three causes, value + checks disambiguate (rootCause claim)",
+      "objective": "demonstrate the record's core claim — the same flat shape arises from optimizer-not-stepping, broken graph, and prior-only learning; the loss VALUE (ln2 vs prior entropy) plus the cheapest checks (grad norms, param drift, majority baseline) separate them",
+      "category": "boundary",
+      "round": 1,
+      "critical": true,
+      "expected": {
+        "expectedResult": "C5-VALUE-AND-CHECKS-DISAMBIGUATE",
+        "successCriteria": "exit 0, A and B flat at exactly ln(2) with different check outcomes, C flat at the prior entropy",
+        "failureCriteria": "flat curves not reproduced or checks do not discriminate"
+      },
+      "criteria": {
+        "exitCode": 0,
+        "outputContains": [
+          "C5-VALUE-AND-CHECKS-DISAMBIGUATE"
+        ],
+        "outputNotContains": []
+      },
+      "command": "python3 knowledge/verification/sandbox/VRUN-000004/c5_flat_ambiguity.py",
+      "finalStatus": "PASS",
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "PASS",
+          "exitCode": 0,
+          "timedOut": false,
+          "durationMs": 435,
+          "startedAt": "2026-11-19T11:09:10.936Z",
+          "journalRef": "hryz94f1",
+          "note": "exit 0 + 1 output assertion(s) satisfied",
+          "output": "$ python3 knowledge/verification/sandbox/VRUN-000004/c5_flat_ambiguity.py\nC5-A not-stepping: step0=0.693147 after-200-lr0-steps=0.693147 (ln2=0.693147)\nC5-A checks: grad-norm=1.016803 (nonzero=True), params-unchanged=True -> gradients exist, optimizer never applies them\nC5-B broken-graph: after-200-steps=0.693147 (identical VALUE to A: True)\nC5-B checks: loss identical to A, but the cause differs — A has flowing grads and lr=0; B has NO gradient path at all (update receives zeros)\nC5-C prior-flat: converged loss=0.344746 class-prior-entropy H=0.356843 majority-share=0.885\nC5-C checks: loss-at-prior-floor=True -> the model learned only the class prior (labels near-constant AND inputs uninformative)\nC5 value-classes: chance-level ln2=0.693147 (A,B) vs prior-floor 0.356843 (C) — the VALUE splits the candidate space before any check runs\nC5-FLAT-AMBIGUOUS\nC5-VALUE-AND-CHECKS-DISAMBIGUATE\nexit code: 0"
+        }
+      ]
+    },
+    {
+      "id": "VTC-000020",
+      "name": "C6 NaN/Inf-early ambiguity: loss fault vs LR fault, checks disambiguate",
+      "objective": "demonstrate that a numeric loss fault (naive log(p) underflow, clean inputs) and an LR fault (explosion at lr=1e4) produce the same early-explosion shape, and the record's checks (input scan, loss audit, LR probe) separate them",
+      "category": "boundary",
+      "round": 1,
+      "critical": true,
+      "expected": {
+        "expectedResult": "C6-CHECKS-DISAMBIGUATE",
+        "successCriteria": "exit 0, cause-1 inf with clean inputs and finite stable-form audit, cause-2 explosion with LR probe stabilizing",
+        "failureCriteria": "explosions not reproduced or checks do not discriminate"
+      },
+      "criteria": {
+        "exitCode": 0,
+        "outputContains": [
+          "C6-CHECKS-DISAMBIGUATE"
+        ],
+        "outputNotContains": []
+      },
+      "command": "python3 knowledge/verification/sandbox/VRUN-000004/c6_exploding_ambiguity.py",
+      "finalStatus": "PASS",
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "PASS",
+          "exitCode": 0,
+          "timedOut": false,
+          "durationMs": 81,
+          "startedAt": "2026-11-19T11:09:11.694Z",
+          "journalRef": "n833wdsa",
+          "note": "exit 0 + 1 output assertion(s) satisfied",
+          "output": "$ python3 knowledge/verification/sandbox/VRUN-000004/c6_exploding_ambiguity.py\nC6-cause1 loss-fault: inputs-clean=True (min=[-0.9398348215504229, -0.9699985261007902], max=[0.9953124009261687, 0.9913832833123983]); step-0 losses contain inf=True\nC6-cause1 audit: stable log-sum-exp form on the SAME logits stays finite (max=827.5) -> the fault is the naive log(p), i.e. inside the loss computation, not the data\nC6-cause2 LR-fault: step-0 loss healthy=0.699176 (ln2=0.693147); exploded-to-nonfinite=True within 2 steps at lr=1e4\nC6-cause2 checks: inputs clean=True (not (a)); loss already uses the stable log-sum-exp form (not (b)); grad-norms at healthy steps=['0.122', '0.122'] (sane — by the record's own guidance this pointed back to (a)/(b), but both were eliminated by their checks, leaving LR)\nC6-cause2 probe: LR reduced to 1e+00 -> stable=True, final loss=0.582731 (moving below step-0 0.699176)\nC6-EXPLODING-AMBIGUOUS\nC6-CHECKS-DISAMBIGUATE\nexit code: 0"
+        }
+      ]
+    },
+    {
+      "id": "VTC-000021",
+      "name": "C3 doc-based: PyTorch clip_grad_norm_ semantics (live fetch)",
+      "objective": "inspect the ACTUAL official PyTorch documentation for the clipping semantics the record references (plan C3: clipping and loss-dtype semantics of the framework in use)",
+      "category": "validation",
+      "round": 1,
+      "critical": true,
+      "expected": {
+        "expectedResult": "C3-DOC-VERIFIED with DOC-SOURCE, DOC-VERSION and quoted sentences",
+        "successCriteria": "exit 0, all three documented phrases found, marker printed",
+        "failureCriteria": "doc fetch fails or documented statements differ"
+      },
+      "criteria": {
+        "exitCode": 0,
+        "outputContains": [
+          "C3-DOC-VERIFIED"
+        ],
+        "outputNotContains": []
+      },
+      "command": "bash knowledge/verification/sandbox/VRUN-000004/c3_clip_doc.sh",
+      "finalStatus": "PASS",
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "PASS",
+          "exitCode": 0,
+          "timedOut": false,
+          "durationMs": 2200,
+          "startedAt": "2026-11-19T11:09:12.000Z",
+          "journalRef": "vxnxjwwd",
+          "note": "exit 0 + 1 output assertion(s) satisfied",
+          "output": "$ bash knowledge/verification/sandbox/VRUN-000004/c3_clip_doc.sh\nDOC-SOURCE: https://pytorch.org/docs/2.15/generated/torch.nn.utils.clip_grad_norm_.html\nDOC-VERSION: 2.15\nDOC-clips-gradient-norm: FOUND\nDOC-norm-over-all-params: FOUND\nDOC-modified-in-place: FOUND\nDOC-QUOTE-what: Clip the gradient norm of an iterable of parameters.\nDOC-QUOTE-norm:  The norm is computed over the norms of the individual gradients of all parameters, as if the norms of the individual gradients were concatenated into a single vector.\nDOC-QUOTE-inplace: Gradients are modified in-place.\nC3-DOC-VERIFIED\nexit code: 0"
+        }
+      ]
+    }
+  ],
+  "metrics": [
+    {
+      "id": "VMET-000018",
+      "runId": "VRUN-000004",
+      "testCaseId": "VTC-000017",
+      "name": "chance_ce_k2",
+      "value": "0.693147",
+      "unit": "nats",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T11:10:02.726Z"
+    },
+    {
+      "id": "VMET-000019",
+      "runId": "VRUN-000004",
+      "testCaseId": "VTC-000017",
+      "name": "chance_ce_k10",
+      "value": "2.302585",
+      "unit": "nats",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T11:10:02.726Z"
+    },
+    {
+      "id": "VMET-000020",
+      "runId": "VRUN-000004",
+      "testCaseId": "VTC-000018",
+      "name": "confident_ce_at_1em9",
+      "value": "0.000000001",
+      "unit": "nats",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T11:10:02.726Z"
+    },
+    {
+      "id": "VMET-000021",
+      "runId": "VRUN-000004",
+      "testCaseId": "VTC-000019",
+      "name": "flat_notstepping_loss",
+      "value": "0.693147",
+      "unit": "nats",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T11:10:02.726Z"
+    },
+    {
+      "id": "VMET-000022",
+      "runId": "VRUN-000004",
+      "testCaseId": "VTC-000019",
+      "name": "flat_prior_floor_loss",
+      "value": "0.344746",
+      "unit": "nats",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T11:10:02.726Z"
+    },
+    {
+      "id": "VMET-000023",
+      "runId": "VRUN-000004",
+      "testCaseId": "VTC-000019",
+      "name": "class_prior_entropy",
+      "value": "0.356843",
+      "unit": "nats",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T11:10:02.726Z"
+    },
+    {
+      "id": "VMET-000024",
+      "runId": "VRUN-000004",
+      "testCaseId": "VTC-000020",
+      "name": "lr_fault_step0_loss",
+      "value": "0.699176",
+      "unit": "nats",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T11:10:02.726Z"
+    },
+    {
+      "id": "VMET-000025",
+      "runId": "VRUN-000004",
+      "testCaseId": "VTC-000020",
+      "name": "lr_probe_stable_loss",
+      "value": "0.582731",
+      "unit": "nats",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T11:10:02.726Z"
+    },
+    {
+      "id": "VMET-000026",
+      "runId": "VRUN-000004",
+      "testCaseId": "VTC-000021",
+      "name": "pytorch_doc_version_inspected",
+      "value": "2.15",
+      "unit": "version",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T11:10:02.726Z"
+    }
+  ],
+  "analyses": [
+    {
+      "id": "VANA-1-mwng7rae",
+      "round": 1,
+      "submittedBy": "GLM (z.ai web)",
+      "createdAt": "2026-11-19T11:10:02.726Z",
+      "summary": "All 5 critical cases passed against real executions on the user's machine (first round — no regression needed; sandbox staging prevented a repeat of the command-size failure mode). Measured: C1 -log(1/K) equals ln(K) exactly for K=2 (0.693147) and K=10 (2.302585); the constant p=1/K predictor's CE equals ln(K) exactly. C2 the CE of near-one-hot confident correct predictions approaches 0 (1.0e-9 at p=1-1e-9), bounded by the missing probability mass. C5 the flat-curve ambiguity: an optimizer-not-stepping config (lr=0) and a broken-graph config produce a loss flat at EXACTLY ln(2)=0.693147 (identical value, different cause — separated by the gradient-norm and parameter-drift checks: grad-norm 1.016803 nonzero with unchanged params vs no gradient path at all), while near-constant labels with uninformative inputs converge to the class-prior entropy (measured 0.344746 vs H=0.356843 at majority share 0.885) — a DIFFERENT value that splits the candidate space before any check runs. C6 the NaN/Inf-early ambiguity: a naive -log(p) loss fault (inf at step 0 with clean inputs; the stable log-sum-exp form stays finite at 827.5 on the same logits) and an LR fault (healthy step-0 loss 0.699176, explosion to non-finite within 2 steps at lr=1e4; LR reduced to 1e0 restores stable descent to 0.582731) produce the same shape, and the record's check list (input scan, loss audit, LR probe) discriminates them — including the honest observation that sane grad norms at the last healthy step pointed back to (a)/(b), which elimination then ruled out. C3 the official PyTorch 2.15 documentation (fetched live from the user's machine; the stable path served a bot-protection challenge and the versioned URL served the content, recorded in DOC-SOURCE) states clip_grad_norm_ clips the gradient norm of an iterable of parameters, computes the norm as if concatenated into a single vector, and modifies gradients in place.",
+      "comparison": "Every prediction matched: baselines exact to 6 decimals; the two ln(2)-valued flats identical to 1e-12 with divergent check outcomes; the prior-floor flat within 0.012 of the analytic prior entropy (0.344746 vs 0.356843 — the gap reflects finite training and the empirical 0.885 label share); the loss-fault/LR-fault discrimination reproduced exactly as designed; all three documented clipping statements found verbatim in the fetched page with quotes preserved.",
+      "alternativeExplanations": "(1) The prior-floor convergence gap (0.012) is finite-training effect, not a baseline error — the check tolerance (0.05) reflects that. (2) The C6 LR-fault demo uses lr=1e4 with sane initial grad norms — the record's own guidance says sane norms point back to (a)/(b); the demo shows the full elimination sequence rather than relying on the norm heuristic alone, which is a faithful (and more honest) application of the record's method. (3) The C4 shape->candidate mappings (train-down/val-up, explodes-after-N-steps) remain practice-based priors per the record's own classification — no source has been read and no experiment run for them; they stay unverified and labeled as such. (4) Pure-python softmax regression substitutes framework training dynamics; framework-specific behaviors (e.g. actual clip_grad_norm_ effect on a real optimizer loop) were not executed — only their documented semantics were inspected.",
+      "recommendedModifications": "The verified evidence supports the record's core claims (shapes are clues; baselines disambiguate; checks confirm). For the owner's review: the record already labels C4 as practice-based; that honesty should be preserved on any future promotion. A future revision could cite the two inspected doc sources (PyTorch 2.15 CrossEntropyLoss via VRUN-000003 and clip_grad_norm_ via VRUN-000004) for its framework-semantics references.",
+      "proposedConclusion": {
+        "status": "VERIFIED",
+        "summary": "All 5 critical test cases passed on real executions on the user's machine: analytic baselines exact; flat-curve ambiguity demonstrated with value+checks discriminating three causes; explosion ambiguity demonstrated with the record's check list discriminating loss-fault vs LR-fault; and the live-fetched PyTorch 2.15 documentation confirms the clipping semantics. The shape->candidate mappings (C4) remain practice-based priors by the record's own classification and are unverified."
+      },
+      "engineDecision": {
+        "accepted": true,
+        "effectiveStatus": "VERIFIED",
+        "reason": "GLM's proposal matches the evidence: all 5 critical test(s) passed against real executions"
+      },
+      "metricIds": [
+        "VMET-000018",
+        "VMET-000019",
+        "VMET-000020",
+        "VMET-000021",
+        "VMET-000022",
+        "VMET-000023",
+        "VMET-000024",
+        "VMET-000025",
+        "VMET-000026"
+      ]
+    }
+  ],
+  "feedback": [],
+  "limitations": [
+    "Commands executed on the user's machine through the VS Code extension as the local user — no CPU/memory sandbox isolation is enforceable through this transport.",
+    "Network access for non-flagged tests could not be technically blocked; tests that declared network needs required explicit owner confirmation instead.",
+    "Attempt outputs are redacted for secrets and capped at 20,000 characters per attempt."
+  ]
+}

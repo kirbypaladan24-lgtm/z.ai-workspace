@@ -30,6 +30,22 @@
  *     skill:refresh). No upload pipeline — the folder is the single source
  *     of truth.
  *
+ * NEW in v3 (adaptive intelligence — knowledge.ts):
+ *   - JSONL knowledge store living in the USER'S workspace (knowledge/),
+ *     synced through the extension. Portable with the repo, git-versioned.
+ *   - Lifecycle: candidate → verification_pending → verified | rejected,
+ *     plus deprecated/archived/soft-delete; failed attempts as negative
+ *     retrieval signal; reuse feedback; append-only audit history.
+ *   - Verification gate: checks are executed BY THE SERVICE via run_command
+ *     on the user's machine — real exit codes bound as evidence. The
+ *     operator (GLM) can submit/attempt/feedback/propose/verify but can
+ *     NEVER set "verified" directly; promotion happens through the gate or
+ *     explicit owner approval on the paired dashboard.
+ *   - Experience preflight: journaled knowledge:preflight entries prove
+ *     whether the agent searched shared knowledge before relevant work.
+ *   - Operator admin API: /knowledge* routes. Dashboard: knowledge:state /
+ *     knowledge:action socket events.
+ *
  * Socket.io path is "/" — the Caddy gateway routes ?XTransformPort=3003 here.
  */
 import { createServer, IncomingMessage, ServerResponse } from 'http';
@@ -38,6 +54,8 @@ import { randomUUID } from 'crypto';
 import { readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import ZAI from 'z-ai-web-dev-sdk';
+import { initKnowledge, type KnowledgeApi } from './knowledge';
+import { initVerification, type VerificationApi, type VRunDetail } from './verification';
 
 const PORT = parseInt(process.env.AGENT_PORT ?? '3003', 10);
 const ADMIN_PORT = parseInt(process.env.AGENT_ADMIN_PORT ?? '3004', 10);
@@ -217,7 +235,7 @@ interface ActivityEntry {
   ts: number;
   source: 'operator' | 'web' | 'vscode' | 'local' | 'system';
   actor: string;
-  kind: 'tool' | 'note' | 'fs' | 'conn' | 'skill';
+  kind: 'tool' | 'note' | 'fs' | 'conn' | 'skill' | 'knowledge' | 'verification';
   tool?: string;
   fsType?: 'created' | 'changed' | 'deleted';
   path?: string;
@@ -575,10 +593,117 @@ async function readWorkspaceSkill(name: string): Promise<{ skill?: WorkspaceSkil
 }
 
 /* ------------------------------------------------------------------ */
+/* Knowledge — adaptive intelligence layer (see knowledge.ts)          */
+/* The workspace knowledge/ folder is the source of truth; the service  */
+/* keeps a local mirror + runs the verification gate through runTool.   */
+/* ------------------------------------------------------------------ */
+const knowledge: KnowledgeApi = initKnowledge({
+  isOnline: bridgeOnline,
+  projectName: () => state.workspace?.name ?? null,
+  runCheck: async (command, timeoutMs) => {
+    // journaled run_command ON THE USER'S MACHINE — the exit code is captured
+    // by the extension and cannot be fabricated by the model (plan §5.2)
+    const r = await runTool('run_command', { command, timeout_ms: timeoutMs }, 'operator', 'GLM (z.ai web)');
+    const meta = (r.meta ?? {}) as { exitCode?: number | null; timedOut?: boolean };
+    return {
+      ok: r.ok,
+      exitCode: meta.exitCode ?? (r.ok ? 0 : 1),
+      timedOut: !!meta.timedOut,
+      result: String(r.result ?? ''),
+      entryId: r.entryId,
+    };
+  },
+  logKnowledge: (e) =>
+    logActivity({
+      source: e.source,
+      actor: e.actor,
+      kind: 'knowledge',
+      tool: e.tool,
+      ok: e.ok,
+      result: e.result,
+      meta: e.meta,
+    } as Omit<ActivityEntry, 'id' | 'ts'>),
+  broadcastState: () => broadcastPaired('knowledge:state', knowledge.stateForWeb()),
+  dataDir: DATA_DIR,
+  rawExec: (name, args) => execToolViaVscode(name, args) as Promise<{ ok: boolean; result: string; content?: string }>,
+});
+
+/* ------------------------------------------------------------------ */
+/* Verification — the SCIENTIFIC VERIFICATION ENGINE (verification.ts) */
+/* GLM designs experiments; the BRIDGE executes them, records real     */
+/* outputs/exit codes, evaluates PASS/FAIL, computes the statistics    */
+/* and decides whether evidence supports the proposed conclusion.      */
+/* A run NEVER approves knowledge — the owner stays in control.        */
+/* ------------------------------------------------------------------ */
+const verification: VerificationApi = initVerification({
+  isOnline: bridgeOnline,
+  projectName: () => state.workspace?.name ?? null,
+  runTest: async (command, timeoutMs, ctx) => {
+    // journaled run_command ON THE USER'S MACHINE — full output, real exit
+    // code captured by the extension, duration, and a journal reference.
+    // The verification engine's evidence is unfabricatable by design.
+    const r = await runTool(
+      'run_command',
+      { command, timeout_ms: timeoutMs },
+      ctx?.source === 'web' ? 'web' : 'operator',
+      ctx?.actor ?? 'GLM (z.ai web)',
+    );
+    const meta = (r.meta ?? {}) as { exitCode?: number | null; timedOut?: boolean };
+    return {
+      ok: r.ok,
+      exitCode: meta.exitCode ?? (r.ok ? 0 : 1),
+      timedOut: !!meta.timedOut,
+      output: String(r.result ?? ''),
+      durationMs: r.durMs ?? 0,
+      journalRef: r.entryId,
+    };
+  },
+  logVerification: (e) =>
+    logActivity({
+      source: e.source,
+      actor: e.actor,
+      kind: 'verification',
+      tool: e.tool,
+      ok: e.ok,
+      result: e.result,
+      meta: e.meta,
+    } as Omit<ActivityEntry, 'id' | 'ts'>),
+  broadcastState: () => broadcastPaired('verification:state', verification.stateForWeb()),
+  broadcastRun: (detail: VRunDetail) => broadcastPaired('verification:run', detail),
+  dataDir: DATA_DIR,
+  rawExec: (name, args) => execToolViaVscode(name, args) as Promise<{ ok: boolean; result: string; content?: string }>,
+});
+
+/* ------------------------------------------------------------------ */
 /* Live connections                                                    */
 /* ------------------------------------------------------------------ */
 let vscodeSocket: Socket | null = null; // the one connected workspace
 const webSockets = new Map<Socket, { paired: boolean; token: string | null }>();
+
+/* Instance-proof liveness (globalThis). bun --hot / re-evaluation can leave
+ * stale module instances whose closures capture a DEAD vscodeSocket binding
+ * while the live route code sees the live one — a split-brain where tools
+ * work but knowledge/verification syncs report "workspace offline". Every
+ * evaluation publishes a live getter + freshness interval on globalThis;
+ * the LAST evaluation wins, and every reader (fresh or stale) sees the
+ * process-wide truth instead of a captured binding. */
+const gBridge = globalThis as any;
+function publishBridgeLiveness() {
+  gBridge.__bridgeSocketGet = () => vscodeSocket;
+  gBridge.__bridgeOnline = false;
+  if (gBridge.__bridgeOnlineTimer) clearInterval(gBridge.__bridgeOnlineTimer);
+  gBridge.__bridgeOnlineTimer = setInterval(() => {
+    gBridge.__bridgeOnline = !!vscodeSocket && !!vscodeSocket.connected;
+  }, 2000);
+}
+publishBridgeLiveness();
+function bridgeOnline(): boolean {
+  if (typeof gBridge.__bridgeOnline === 'boolean') return gBridge.__bridgeOnline;
+  return !!vscodeSocket && !!vscodeSocket.connected;
+}
+function bridgeSocket(): Socket | null {
+  return typeof gBridge.__bridgeSocketGet === 'function' ? gBridge.__bridgeSocketGet() : vscodeSocket;
+}
 
 /* Pending tool executions: callId -> {resolve, timer} */
 interface ToolOutcome { ok: boolean; result: string; meta?: any; content?: string }
@@ -606,6 +731,8 @@ function statusPayload() {
     tree: treeCache ? { ...treeCache.stats, name: treeCache.name } : null,
     activityCount: activity.length,
     skills: skillsSummary(),
+    knowledge: knowledge.summary(),
+    verification: verification.stateForWeb().counts,
     extensionVersion: '0.4.0+',
   };
 }
@@ -689,7 +816,8 @@ function activityForWeb(paired: boolean): ActivityEntry[] {
 /* ------------------------------------------------------------------ */
 function execToolViaVscode(name: string, args: any): Promise<ToolOutcome> {
   return new Promise((resolve) => {
-    if (!vscodeSocket || !vscodeSocket.connected) {
+    const sock = bridgeSocket();
+    if (!sock || !sock.connected) {
       resolve({ ok: false, result: 'Workspace is not connected (VS Code offline).' });
       return;
     }
@@ -705,7 +833,7 @@ function execToolViaVscode(name: string, args: any): Promise<ToolOutcome> {
       },
       timer,
     });
-    vscodeSocket.emit('tool:exec', { id: callId, name, args });
+    sock.emit('tool:exec', { id: callId, name, args });
   });
 }
 
@@ -1082,6 +1210,7 @@ io.on('connection', (socket) => {
         return;
       }
       vscodeSocket = socket;
+      gBridge.__bridgeOnline = true;
       persistState();
 
       socket.emit('vscode:registered', { name, persistent });
@@ -1096,6 +1225,9 @@ io.on('connection', (socket) => {
       });
       emitStatus();
       console.log(`[vscode] workspace "${name}" connected (persistent=${persistent})`);
+      // the workspace is the source of truth — pull the knowledge + verification stores now
+      void knowledge.sync('system', 'System');
+      void verification.sync('system', 'System');
 
       /* ---- events from the extension ---- */
 
@@ -1157,6 +1289,7 @@ io.on('connection', (socket) => {
       socket.on('disconnect', () => {
         if (vscodeSocket === socket) {
           vscodeSocket = null;
+          gBridge.__bridgeOnline = false;
           logActivity({
             source: 'system',
             actor: 'System',
@@ -1184,7 +1317,11 @@ io.on('connection', (socket) => {
       if (treeCache) socket.emit('workspace:tree', treeCache);
       else void ensureTree(); // legacy-extension fallback or first scan
       socket.emit('skill:list', { skills: skillsForWeb(), scannedAt: skillsScan.scannedAt, online: skillsScan.online, note: skillsScan.note });
+      socket.emit('knowledge:state', knowledge.stateForWeb());
+      socket.emit('verification:state', verification.stateForWeb());
       void scanWorkspaceSkills(false); // background refresh if stale — broadcasts a fresh list when it scans
+      void knowledge.sync('system', 'System'); // background re-sync — broadcasts knowledge:state when done
+      void verification.sync('system', 'System'); // re-sync — broadcasts verification:state when done
     }
     console.log(`[web] client connected (paired=${paired})`);
 
@@ -1204,6 +1341,10 @@ io.on('connection', (socket) => {
         if (treeCache) socket.emit('workspace:tree', treeCache);
         else void ensureTree();
         socket.emit('skill:list', { skills: skillsForWeb(), scannedAt: skillsScan.scannedAt, online: skillsScan.online, note: skillsScan.note });
+        socket.emit('knowledge:state', knowledge.stateForWeb());
+        socket.emit('verification:state', verification.stateForWeb());
+        void knowledge.sync('system', 'System');
+        void verification.sync('system', 'System');
       void scanWorkspaceSkills(false); // background refresh if stale — broadcasts a fresh list when it scans
         logActivity({
           source: 'system',
@@ -1347,6 +1488,76 @@ io.on('connection', (socket) => {
         : { ok: false, error: r.error });
     });
 
+    /* ---- knowledge (paired web viewers = the owner's control center).  */
+    /* Owner-only actions live HERE, never on the admin API — the agent   */
+    /* cannot approve/reject/archive knowledge (plan §1 core principle).  */
+
+    socket.on('knowledge:action', async (d: any, cb?: any) => {
+      const info = webSockets.get(socket);
+      const done = (r: any) => { if (typeof cb === 'function') cb(r); };
+      if (!info?.paired) { done({ ok: false, error: 'Pair with the workspace to manage knowledge.' }); return; }
+      const actor = 'Owner (dashboard)';
+      const action = String(d?.action ?? '');
+
+      if (action === 'refresh') {
+        const st = await knowledge.sync('web', actor);
+        done({ ok: true, summary: knowledge.summary(), note: st.note });
+        return;
+      }
+
+      const id = String(d?.id ?? '');
+      const reason = String(d?.reason ?? '');
+      const version = d?.version != null ? Number(d.version) : undefined;
+      if (!id) { done({ ok: false, error: 'missing record id' }); return; }
+      const r = await knowledge.ownerAction(id, action as never, reason, actor, version);
+      done(r.ok ? { ok: true, record: r.record } : { ok: false, error: r.error });
+    });
+
+    /* ---- verification (paired web viewers = the owner's control center). */
+    /* Start/cancel/feedback are OWNER decisions: test execution begins     */
+    /* only when the owner reviews the plan and presses Start (spec §4      */
+    /* PHASE 4). Dangerous tests (network/destructive) require the armed    */
+    /* confirm pattern on the dashboard.                                   */
+
+    socket.on('verification:action', async (d: any, cb?: any) => {
+      const info = webSockets.get(socket);
+      const done = (r: any) => { if (typeof cb === 'function') cb(r); };
+      if (!info?.paired) { done({ ok: false, error: 'Pair with the workspace to run verifications.' }); return; }
+      const actor = 'Owner (dashboard)';
+      const action = String(d?.action ?? '');
+      const runId = String(d?.runId ?? '');
+
+      if (action === 'refresh') {
+        await verification.sync('web', actor);
+        done({ ok: true, state: verification.stateForWeb() });
+        return;
+      }
+      if (action === 'get') {
+        const r = verification.getRun(runId);
+        done(r.ok ? { ok: true, detail: r.detail } : { ok: false, error: r.error });
+        return;
+      }
+      if (!runId) { done({ ok: false, error: 'missing runId' }); return; }
+
+      if (action === 'start') {
+        const r = await verification.startRun(runId, 'web', actor, { confirmDangerous: !!d?.confirmDangerous });
+        done(r);
+        return;
+      }
+      if (action === 'cancel') {
+        const r = await verification.cancelRun(runId, 'web', actor, String(d?.reason ?? ''));
+        done(r);
+        return;
+      }
+      if (action === 'feedback') {
+        const decision = d?.decision === 'reject' ? 'reject' : d?.decision === 'comment' ? 'comment' : 'accept';
+        const r = await verification.recordFeedback(runId, decision, String(d?.comment ?? ''), actor);
+        done(r);
+        return;
+      }
+      done({ ok: false, error: `unknown verification action "${action}"` });
+    });
+
     socket.on('disconnect', () => {
       webSockets.delete(socket);
       emitStatus();
@@ -1423,6 +1634,7 @@ const adminServer = createServer(async (req, res) => {
         pairedWebs: [...webSockets.values()].filter((w) => w.paired).length,
         activityCount: activity.length,
         skills: skillsSummary(),
+        knowledge: knowledge.summary(),
         tree: treeCache ? { name: treeCache.name, ...treeCache.stats } : null,
         running,
         queued: queue.length,
@@ -1476,6 +1688,89 @@ const adminServer = createServer(async (req, res) => {
       return;
     }
 
+    /* ---- knowledge: agent-facing routes. Submit / attempt / feedback  */
+    /* / propose / verify / search / sync — but NEVER approve/reject:     */
+    /* promotion happens only through the verification gate (real exit   */
+    /* codes) or the owner's dashboard (plan §1, §5.2).                   */
+
+    // GET /knowledge — store summary
+    if (req.method === 'GET' && url.pathname === '/knowledge') {
+      sendJson(res, 200, knowledge.summary());
+      return;
+    }
+
+    // GET /knowledge/record?id=EXP-000001
+    if (req.method === 'GET' && url.pathname === '/knowledge/record') {
+      const id = url.searchParams.get('id') ?? '';
+      if (!id) { sendJson(res, 400, { ok: false, error: 'missing ?id=' }); return; }
+      const r = knowledge.get(id);
+      sendJson(res, 200, r);
+      return;
+    }
+
+    // POST /knowledge/search {query, scope?, category?, limit?, includeRejected?, preflight?}
+    if (req.method === 'POST' && url.pathname === '/knowledge/search') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      const r = knowledge.search(String(body?.query ?? ''), {
+        scope: body?.scope,
+        category: body?.category,
+        limit: body?.limit,
+        includeRejected: !!body?.includeRejected,
+        preflight: !!body?.preflight,
+      }, 'operator', 'GLM (z.ai web)');
+      sendJson(res, 200, r);
+      return;
+    }
+
+    // POST /knowledge/submit {scope?, category?, title, problemSummary, solutionSteps, ...}
+    if (req.method === 'POST' && url.pathname === '/knowledge/submit') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      const r = await knowledge.submit(body ?? {}, 'operator', 'GLM (z.ai web)');
+      sendJson(res, r.ok ? 200 : 400, r);
+      return;
+    }
+
+    // POST /knowledge/attempt {problemSummary, approach, result?, failureReason?, environment?, experienceId?}
+    if (req.method === 'POST' && url.pathname === '/knowledge/attempt') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      const r = await knowledge.attempt(body ?? {}, 'operator', 'GLM (z.ai web)');
+      sendJson(res, r.ok ? 200 : 400, r);
+      return;
+    }
+
+    // POST /knowledge/feedback {experienceId, outcome, notes?}
+    if (req.method === 'POST' && url.pathname === '/knowledge/feedback') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      const r = await knowledge.feedback(body ?? {}, 'operator', 'GLM (z.ai web)');
+      sendJson(res, r.ok ? 200 : 400, r);
+      return;
+    }
+
+    // POST /knowledge/verify {id, checks:[{command, timeoutMs?}], version?}
+    if (req.method === 'POST' && url.pathname === '/knowledge/verify') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      const checks = Array.isArray(body?.checks) ? body.checks : [];
+      const r = await knowledge.verify(String(body?.id ?? ''), checks, 'operator', 'GLM (z.ai web)', body?.version != null ? Number(body.version) : undefined);
+      sendJson(res, r.ok ? 200 : 400, r);
+      return;
+    }
+
+    // POST /knowledge/propose {id, solutionSteps, reason, ...}
+    if (req.method === 'POST' && url.pathname === '/knowledge/propose') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      const r = await knowledge.propose(String(body?.id ?? ''), body ?? {}, 'operator', 'GLM (z.ai web)');
+      sendJson(res, r.ok ? 200 : 400, r);
+      return;
+    }
+
+    // POST /knowledge/sync — force re-sync from the workspace store
+    if (req.method === 'POST' && url.pathname === '/knowledge/sync') {
+      const st = await knowledge.sync('operator', 'GLM (z.ai web)');
+      sendJson(res, 200, knowledge.summary());
+      void st;
+      return;
+    }
+
     // POST run {tool, args}
     if (req.method === 'POST' && url.pathname === '/run') {
       const body = JSON.parse((await readBody(req)) || '{}');
@@ -1517,6 +1812,119 @@ const adminServer = createServer(async (req, res) => {
       return;
     }
 
+    /* ---- verification engine: agent-facing routes (plan/analyze/report). */
+    /* NOTE: start/cancel are ALSO owner actions on the dashboard socket —  */
+    /* the admin variants are journaled as operator-initiated. The bridge   */
+    /* refuses to mark anything verified without real executed evidence.    */
+
+    // GET /verification — state summary + compact run list
+    if (req.method === 'GET' && url.pathname === '/verification') {
+      sendJson(res, 200, verification.stateForWeb());
+      return;
+    }
+
+    // GET /verification/run?id=VRUN-000001 — full detail (steps, cases, attempts, metrics, evidence)
+    if (req.method === 'GET' && url.pathname === '/verification/run') {
+      const r = verification.getRun(url.searchParams.get('id') ?? '');
+      sendJson(res, r.ok ? 200 : 404, r.ok ? { ok: true, detail: r.detail } : r);
+      return;
+    }
+
+    // POST /verification/run {knowledgeId, knowledgeVersion?, problem, hypothesis, strategy?}
+    if (req.method === 'POST' && url.pathname === '/verification/run') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      const kId = String(body?.knowledgeId ?? '');
+      const k = knowledge.get(kId);
+      if (!k.ok) { sendJson(res, 400, { ok: false, error: `unknown knowledge record "${kId}" — a verification run must target an existing experience` }); return; }
+      const version = body?.knowledgeVersion != null ? Number(body.knowledgeVersion) : k.record!.activeVersion;
+      const r = await verification.createRun({ ...body, knowledgeVersion: version }, 'operator', 'GLM (z.ai web)');
+      sendJson(res, r.ok ? 200 : 400, r.ok ? { ok: true, run: { ...r.run!, steps: undefined, rounds: undefined, analyses: undefined }, next: 'POST /verification/plan with the test cases' } : r);
+      return;
+    }
+
+    // POST /verification/plan {runId, experiments?, cases:[{name, command, criteria, flags, expected}]}
+    if (req.method === 'POST' && url.pathname === '/verification/plan') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      const r = await verification.submitPlan(body ?? {}, 'operator', 'GLM (z.ai web)');
+      sendJson(res, r.ok ? 200 : 400, r.ok
+        ? { ok: true, runId: r.run!.id, status: r.run!.status, cases: r.run!.stats.planned, needsDangerousConfirm: r.run!.needsDangerousConfirm, refused: r.refused, next: 'owner reviews the plan on the dashboard and presses Start (or POST /verification/start)' }
+        : r);
+      return;
+    }
+
+    // POST /verification/start {runId, confirmDangerous?}
+    if (req.method === 'POST' && url.pathname === '/verification/start') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      const r = await verification.startRun(String(body?.runId ?? ''), 'operator', 'GLM (z.ai web)', { confirmDangerous: !!body?.confirmDangerous });
+      sendJson(res, r.ok ? 200 : 400, r.ok ? { ok: true, note: 'execution running — progress broadcasts on verification:run; stats update live' } : r);
+      return;
+    }
+
+    // POST /verification/cancel {runId, reason?}
+    if (req.method === 'POST' && url.pathname === '/verification/cancel') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      const r = await verification.cancelRun(String(body?.runId ?? ''), 'operator', 'GLM (z.ai web)', String(body?.reason ?? ''));
+      sendJson(res, r.ok ? 200 : 400, r);
+      return;
+    }
+
+    // POST /verification/analyze {runId, summary, comparison, proposedConclusion, metrics}
+    if (req.method === 'POST' && url.pathname === '/verification/analyze') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      const r = await verification.submitAnalysis(body ?? {}, 'operator', 'GLM (z.ai web)');
+      sendJson(res, r.ok ? 200 : 400, r.ok
+        ? { ok: true, runId: r.run!.id, engineDecision: r.analysis!.engineDecision, effectiveStatus: r.run!.status, rejectedMetrics: r.rejectedMetrics, next: 'POST /verification/regress (another round) or /verification/report (finalize)' }
+        : r);
+      return;
+    }
+
+    // POST /verification/regress {runId, hypothesis?, changeNote?, cases:[…]} — new round, prior rounds preserved
+    if (req.method === 'POST' && url.pathname === '/verification/regress') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      const r = await verification.addRegression(body ?? {}, 'operator', 'GLM (z.ai web)');
+      sendJson(res, r.ok ? 200 : 400, r.ok ? { ok: true, runId: r.run!.id, round: r.run!.rounds.length, status: r.run!.status, refused: r.refused } : r);
+      return;
+    }
+
+    // POST /verification/report {runId} — bridge assembles the report from persisted records
+    if (req.method === 'POST' && url.pathname === '/verification/report') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      const runId = String(body?.runId ?? '');
+      const run = verification.getRun(runId);
+      let knowledgeContext: { title: string; solutionSteps: string } | null = null;
+      if (run.ok) {
+        const k = knowledge.get(run.detail!.run.knowledgeId);
+        if (k.ok) {
+          const v = k.record!.versions.find((x) => x.version === run.detail!.run.knowledgeVersion) ?? k.record!.versions.find((x) => x.version === k.record!.activeVersion);
+          knowledgeContext = v ? { title: k.record!.title, solutionSteps: v.solutionSteps } : { title: k.record!.title, solutionSteps: '' };
+        }
+      }
+      const r = await verification.generateReport(runId, 'operator', 'GLM (z.ai web)', knowledgeContext);
+      sendJson(res, r.ok ? 200 : 400, r.ok ? { ok: true, evidence: r.evidence, reportStatus: r.report!.verificationStatus } : r);
+      return;
+    }
+
+    // POST /verification/sync — force re-sync from the workspace store
+    if (req.method === 'POST' && url.pathname === '/verification/sync') {
+      await verification.sync('operator', 'GLM (z.ai web)');
+      sendJson(res, 200, verification.stateForWeb());
+      return;
+    }
+
+    // GET /debug/live — instance-proof liveness diagnostics
+    if (req.method === 'GET' && url.pathname === '/debug/live') {
+      const sock = bridgeSocket();
+      sendJson(res, 200, {
+        ok: true,
+        socketSet: !!sock,
+        socketConnected: !!sock?.connected,
+        bridgeOnlineFlag: bridgeOnline(),
+        verificationOnline: verification.stateForWeb().online,
+        knowledgeOnline: knowledge.summary().online,
+      });
+      return;
+    }
+
     sendJson(res, 404, { ok: false, error: `no route: ${route}` });
   } catch (e: any) {
     sendJson(res, 500, { ok: false, error: String(e?.message ?? e) });
@@ -1531,11 +1939,12 @@ adminServer.listen(ADMIN_PORT, '127.0.0.1', () => {
 /* Boot                                                                */
 /* ------------------------------------------------------------------ */
 httpServer.listen(PORT, () => {
-  console.log(`AI Code Agent service v2 listening on port ${PORT} (socket.io path "/")`);
+  console.log(`AI Code Agent service v3 listening on port ${PORT} (socket.io path "/")`);
   if (state.workspace) {
     console.log(`Paired workspace on file: "${state.workspace.name}" (pairing code ${state.workspace.pairingCode})`);
   }
   console.log(`Activity entries: ${activity.length}, queued messages: ${queue.length}, tree cache: ${treeCache ? `${treeCache.stats.files} files` : 'none'}`);
+  console.log(`Knowledge store: ${knowledge.summary().counts.verified} verified / ${knowledge.summary().counts.candidate} candidate / ${knowledge.summary().counts.attempts} attempts (syncs when the workspace connects)`);
 });
 
 function shutdown() {

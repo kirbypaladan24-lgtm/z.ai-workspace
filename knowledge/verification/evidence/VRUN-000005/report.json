@@ -1,0 +1,462 @@
+{
+  "id": "RPT-VRUN-000005",
+  "runId": "VRUN-000005",
+  "knowledge": {
+    "id": "EXP-000010",
+    "version": 3,
+    "title": "Database performance: N+1 queries — latency grows with row count; MEASURE query count first, then batch reads (Prisma include / WHERE IN). SQLite 'database is locked' is a separate write-transaction problem",
+    "solutionUnderTest": "1) MEASURE FIRST: enable query logging (Prisma: new PrismaClient({ log: ['query'] })) and COUNT queries per request at TWO row counts (e.g. 10 and 100). N+1 shows as the count growing with rows; the goal is a count CONSTANT w.r.t. row count. 2) Replace loop-accessed relations with one batched read: db.post.findMany({ include: { author: true } }). CAUTION: 'include = one JOIN' is NOT guaranteed — relation loading may compile to a JOIN or to a small number of batched queries depending on ORM version, provider and relation shape. The verifiable requirement is the CONSTANT QUERY COUNT measured in step 1, not a presumed SQL shape. 3) Key lists: db.user.findMany({ where: { id: { in: ids } } }) then group in memory. 4) GraphQL servers: DataLoader coalesces same-tick lookups. 5) VERIFY the fix: recount queries at both row counts — constant count with growing rows = fixed; anything else is not. 6) Over-fetching: shape with select. Nesting depth of ANY level is a COST signal to examine (query complexity, payload size); the response ladder in order of preference: shape with select -> split into separate queries -> push aggregation into the DB (groupBy / raw SQL) -> ONLY for a measured, reproducible hot path: denormalize, accepting an explicit consistency trade-off. There is NO depth threshold that by itself proves denormalization is required. 7) SQLite lock errors are NOT fixed by batching reads. Check for: concurrent writers, long-running or interactive write transactions, missing busy timeout. Candidate mitigations to verify on your stack: PRAGMA journal_mode=WAL; busy_timeout; keeping write transactions short.\n\nVERIFICATION PLAN (PLANNED — NOT EXECUTED; no evidence exists for v2 claims yet): V1 doc-based (NOT yet inspected): SQLite official docs on the rollback-journal lock states (RESERVED / PENDING / EXCLUSIVE) and WAL-mode reader/writer concurrency — confirm the corrected locking explanation. V2 experimental (sqlite3 available on the user machine; run in a temp dir via mktemp -d so nothing is written into the workspace): open two sqlite3 sessions on one DB; BEGIN a write in one; attempt a write in the other — observe the lock error; then set journal_mode=WAL and observe the reader proceed during a pending write. V3 experimental (requires Node + Prisma — NOT on the user machine; candidate env: the Z.ai sandbox with its pinned Prisma version): seed a small schema, count queries for findMany + include at 10 vs 100 rows with log: ['query']; assert constant count for include and linear count for the loop pattern. V4 doc-based (NOT yet inspected): Prisma docs on query logging and SQLite concurrency for the INSTALLED major version. This record must not be promoted until V1-V3 have produced evidence."
+  },
+  "generatedAt": "2026-11-19T11:20:17.459Z",
+  "generatedBy": "bridge report generator (assembled from persisted execution records)",
+  "verificationStatus": "VERIFIED",
+  "conclusion": {
+    "status": "VERIFIED",
+    "summary": "all 4 critical test(s) passed against real executions",
+    "glmInterpretation": "All 4 bridge cases passed against real executions on the user's machine (first round). Measured: V0 on real SQLite (user machine, Python 3.14.4, sqlite 3.46.1) the N+1 loop pattern executes exactly 501 queries at 500 parents while the single JOIN executes 1 query, with the loop 26.3x slower (15.9ms vs 0.6ms) — query count is the primary signal and it grows with row count exactly as the record claims. V2 the locking experiment reproduced all four documented behaviors: with a 0.25s busy timeout a second writer receives 'database is locked' while another writer holds an open write transaction; with a 3s busy timeout the same write succeeds after the holder commits; after PRAGMA journal_mode=WAL a reader proceeds during a pending write ('ok rows=3') while a second writer is STILL blocked ('database is locked') — writers serialize even in WAL; the default journal mode was 'delete' (rollback journal). V1 the live-fetched official SQLite documentation (lockingv3.html, wal.html, busy_timeout.html) contains the RESERVED and PENDING lock-state definitions verbatim, 'since there is only one WAL file, there can only be one writer at a time', 'readers do not block writers and a writer does not block readers', and the busy-handler sleep semantics — the record's corrected locking explanation matches the documentation. V4 the live-fetched Prisma v6 documentation (observability-and-logging/logging, queries/query-optimization-performance) documents the new PrismaClient({log:['query',...]}) configuration, event-based logging via $on, defines the n+1 problem ('one additional query per result'), and states the batching nuance that the dataloader 'does not currently batch findMany() queries'. SUPPLEMENTARY (Z.ai sandbox VM, Prisma 6.19.2 — labeled, not bridge-executed): the loop pattern ran 11 queries at 10 rows growing to 101 at 100 rows, while findMany({include:{children:true}}) ran a CONSTANT 2 queries whose captured SQL is two batched SELECTs (parents, then children WHERE parentId IN (?..)) — NOT a single JOIN. This directly verifies the record's corrected claim that 'include = one JOIN' is NOT guaranteed: on this ORM version and provider it compiles to two batched queries, and the verifiable requirement is the constant query count.",
+    "stats": {
+      "planned": 4,
+      "generated": 4,
+      "executed": 4,
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0,
+      "blocked": 0,
+      "errors": 0,
+      "attempts": 4,
+      "iterations": 1,
+      "passRate": 100
+    },
+    "decidedAt": "2026-11-19T11:20:17.215Z",
+    "decidedBy": "bridge-evaluator (evidence-based)"
+  },
+  "originalProblem": {
+    "description": "EXP-000010 (latest version v3, content of the v2 technical revision) claims: (1) the N+1 pattern runs a query count that grows with row count while a batched read runs a constant count — MEASURE FIRST with query logging; (2) SQLite 'database is locked' is a WRITE-transaction problem, separate from read-side N+1: in the rollback-journal model a write transaction holds RESERVED and takes the database lock at commit, blocking other WRITERS; WAL mode allows readers during a write; a missing busy timeout surfaces as immediate lock errors; (3) 'include = one JOIN' is NOT guaranteed — relation loading may compile to a JOIN or a constant number of batched queries depending on ORM version, provider and relation shape — the verifiable requirement is the constant query count, not a presumed SQL shape; (4) there is no depth threshold that alone mandates denormalization (the v1 rule was removed as unsupported). This run executes the record's own verification plan: V1 (SQLite docs) and V2 (locking experiment) on the user's machine, V4 (Prisma docs for the installed major version, 6.x) on the user's machine, and V0 (N+1 counting on real SQLite). V3 (Prisma runtime query counting) requires node — absent on the user's machine — and was executed in the Z.ai sandbox VM with Prisma 6.19.2 as supplementary evidence reported in the analysis.",
+    "symptoms": "list endpoints whose latency grows linearly with row count; SQLite 'database is locked' errors misdiagnosed as read-side N+1; assumed JOIN semantics for include; depth-threshold denormalization rules",
+    "expectedBehavior": "V0: the loop pattern executes exactly N+1 queries (501 at 500 parents) while the single JOIN executes 1, with the loop measurably slower. V2: with a short busy timeout a second writer gets 'database is locked' while another writer holds an open transaction; with a real busy timeout it succeeds after the holder commits; in WAL mode a reader proceeds during a pending write while a second writer is still blocked. V1: the official SQLite documentation documents the RESERVED/PENDING lock states, that there can only be one writer at a time in WAL, that readers do not block writers, and the busy-handler semantics. V4: the official Prisma v6 documentation documents the query-logging configuration (new PrismaClient({log:['query',...]}), event-based logging via $on) and defines the n+1 problem ('one additional query per result'), including the batching nuance that the dataloader 'does not currently batch findMany() queries'.",
+    "actualBehavior": "to be measured by real execution on the user's machine through the bridge (V0/V1/V2/V4) and in the Z.ai sandbox VM (V3, already executed: loop pattern 11->101 queries at 10->100 rows; include pattern a CONSTANT 2 queries — two batched SELECTs with an IN-list, NOT a single JOIN)",
+    "facts": "SQLite rollback-journal lock states are SHARED/RESERVED/PENDING/EXCLUSIVE (sqlite.org/lockingv3.html); WAL allows exactly one writer at a time while readers proceed concurrently (sqlite.org/wal.html); the busy handler sleeps for a specified time when a table is locked (sqlite.org/c3ref/busy_timeout.html); Prisma 6.19.2 + SQLite compiles findMany({include}) to two batched queries (parent SELECT + child SELECT with parentId IN (...)) as observed in the sandbox experiment with event-based query logging; the user's machine has sqlite3 3.46.1 (CLI) and python3 3.14.4 (bundled sqlite reported at runtime).",
+    "assumptions": "python3 stdlib sqlite3 on the user's machine behaves per the documented SQLite locking model; the sqlite.org and prisma.io pages fetched live are the authoritative current docs; the installed Prisma major version in the Z.ai sandbox (6.19.2, resolved from ^6.11.1) is representative of the v6 docs.",
+    "environment": "user's machine via the bridge extension: Linux, Python 3.14.4, sqlite3 CLI 3.46.1, no node; Z.ai sandbox VM for V3: bun + Prisma 6.19.2",
+    "constraints": "all experiments write only to mktemp temp dirs (nothing in the workspace); doc cases fetch only official sqlite.org and prisma.io pages and are flagged requiresNetwork; outputs below the 20KB truncation limit."
+  },
+  "hypothesis": {
+    "text": "All four bridge cases pass their declared criteria on real execution: the N+1 count grows exactly linearly (501 vs 1 queries at 500 rows) with measurable latency difference; the rollback-journal lock error reproduces with a short busy timeout and clears with a real one; WAL lets readers proceed while writers still serialize; the SQLite documentation contains the lock-state definitions, one-writer and busy-handler statements; and the Prisma v6 documentation documents the logging configuration, the n+1 definition and the findMany batching nuance. Together with the sandbox V3 result (constant 2-query include, growing loop), this verifies the record's core claims: measure query count, not SQL shape; SQLite locking is a separate write-side problem; include semantics are version/provider-dependent.",
+    "expectedObservation": "markers: V0-NPLUS1-CONFIRMED, V2-SQLITE-LOCK-CONFIRMED, V1-DOC-VERIFIED, V4-DOC-VERIFIED",
+    "supportingEvidence": "VM-local dry-runs reproduce V0 (501 vs 1 queries, 31.2x slower loop) and V2 (lock error, busy-timeout success, WAL reader proceeds, WAL writer blocked) on Python 3.12.16/sqlite 3.53.1; the doc scripts verified all assertions against live fetches; the V3 sandbox experiment (Prisma 6.19.2) already produced its output, preserved at scripts/verifications/exp010/v3-prisma-experiment-output.txt.",
+    "contradictingEvidence": "none observed in dry-runs; the Prisma SQLite connector doc page contains no locking/concurrency documentation (checked during design) — the locking claims are therefore verified against SQLite's own docs, which is the authoritative source."
+  },
+  "hypothesisHistory": [
+    {
+      "n": 1,
+      "kind": "initial",
+      "hypothesis": "All four bridge cases pass their declared criteria on real execution: the N+1 count grows exactly linearly (501 vs 1 queries at 500 rows) with measurable latency difference; the rollback-journal lock error reproduces with a short busy timeout and clears with a real one; WAL lets readers proceed while writers still serialize; the SQLite documentation contains the lock-state definitions, one-writer and busy-handler statements; and the Prisma v6 documentation documents the logging configuration, the n+1 definition and the findMany batching nuance. Together with the sandbox V3 result (constant 2-query include, growing loop), this verifies the record's core claims: measure query count, not SQL shape; SQLite locking is a separate write-side problem; include semantics are version/provider-dependent.",
+      "expectedObservation": "markers: V0-NPLUS1-CONFIRMED, V2-SQLITE-LOCK-CONFIRMED, V1-DOC-VERIFIED, V4-DOC-VERIFIED",
+      "changeNote": "initial hypothesis",
+      "createdAt": "2026-11-19T11:18:43.999Z",
+      "outcome": "4/4 executed tests passed (pass rate 100%)"
+    }
+  ],
+  "strategy": "Four bridge cases on the user's machine: V0 N+1 query counting on real SQLite (temp dir), V2 concurrent-writer locking experiment (rollback journal + WAL + busy timeout, threads, temp dir), V1 live SQLite documentation inspection (lockingv3, wal, busy_timeout), V4 live Prisma v6 documentation inspection (logging, query-optimization/N+1). V3 (Prisma runtime) executed in the Z.ai sandbox VM as supplementary labeled evidence. All cases critical; doc cases flagged requiresNetwork.\n\nExperiments: Four bridge cases staged in the run sandbox (V0 N+1 counting, V2 locking experiment with threads, V1 SQLite docs, V4 Prisma v6 docs), plus V3 executed in the Z.ai sandbox VM with Prisma 6.19.2 as supplementary labeled evidence (output preserved at scripts/verifications/exp010/v3-prisma-experiment-output.txt).",
+  "environment": {
+    "capturedAt": 1795087124252,
+    "os": "Linux kirby-LOQ-15IAX9E 7.0.0-43-generic #43-Ubuntu SMP PREEMPT_DYNAMIC Fri Oct 23 13:25:25 UTC 2026 x86_64 GNU/Linux\nexit code: 0",
+    "runtimes": "Python 3.14.4\n/bin/bash: line 1: node: command not found\ngit version 2.53.0\n3.46.1 2024-08-13 09:16:08 c9c2ab54ba1f5f46360f1b4f35d849cd3f080e6fc2b6c60e91b16c63f69aalt1 (64-bit)\nexit code: 0",
+    "sourceRevision": "6c04b92",
+    "journalRefs": [
+      "38cw34bs",
+      "xr8ncxvh",
+      "1687lpeb"
+    ]
+  },
+  "reproducibility": {
+    "os": "Linux kirby-LOQ-15IAX9E 7.0.0-43-generic #43-Ubuntu SMP PREEMPT_DYNAMIC Fri Oct 23 13:25:25 UTC 2026 x86_64 GNU/Linux\nexit code: 0",
+    "runtimes": "Python 3.14.4\n/bin/bash: line 1: node: command not found\ngit version 2.53.0\n3.46.1 2024-08-13 09:16:08 c9c2ab54ba1f5f46360f1b4f35d849cd3f080e6fc2b6c60e91b16c63f69aalt1 (64-bit)\nexit code: 0",
+    "sourceRevision": "6c04b92",
+    "testCommands": [
+      {
+        "id": "VTC-000022",
+        "command": "python3 knowledge/verification/sandbox/VRUN-000005/v0_nplus1_counts.py",
+        "timeoutMs": 120000
+      },
+      {
+        "id": "VTC-000023",
+        "command": "python3 knowledge/verification/sandbox/VRUN-000005/v2_sqlite_locking.py",
+        "timeoutMs": 120000
+      },
+      {
+        "id": "VTC-000024",
+        "command": "bash knowledge/verification/sandbox/VRUN-000005/v1_sqlite_docs.sh",
+        "timeoutMs": 90000
+      },
+      {
+        "id": "VTC-000025",
+        "command": "bash knowledge/verification/sandbox/VRUN-000005/v4_prisma_docs.sh",
+        "timeoutMs": 90000
+      }
+    ],
+    "note": "Re-run the listed commands in the recorded environment to reproduce. All outputs below were captured by the bridge from real executions."
+  },
+  "timeline": [
+    {
+      "n": 1,
+      "name": "Problem Analysis",
+      "status": "complete",
+      "startedAt": 1795087123999,
+      "completedAt": 1795087123999,
+      "durationMs": 0,
+      "details": "problem, symptoms, expected vs actual behavior, facts and assumptions recorded"
+    },
+    {
+      "n": 2,
+      "name": "Hypothesis Formulation",
+      "status": "complete",
+      "startedAt": 1795087123999,
+      "completedAt": 1795087123999,
+      "durationMs": 0,
+      "details": "All four bridge cases pass their declared criteria on real execution: the N+1 count grows exactly linearly (501 vs 1 queries at 500 rows) with measurable latency difference; the rollback-journal lock error reproduces with a short busy timeout and clears with a real one; WAL lets readers proceed whil… (803 chars)"
+    },
+    {
+      "n": 3,
+      "name": "Experiment Design",
+      "status": "complete",
+      "startedAt": 1795087124757,
+      "completedAt": 1795087124757,
+      "durationMs": 0,
+      "details": "Four bridge cases staged in the run sandbox (V0 N+1 counting, V2 locking experiment with threads, V1 SQLite docs, V4 Prisma v6 docs), plus V3 executed in the Z.ai sandbox VM with Prisma 6.19.2 as supplementary labeled evidence (output preserved at scripts/verifications/exp010/v3-prisma-experiment-ou… (310 chars)"
+    },
+    {
+      "n": 4,
+      "name": "Test Plan Generation",
+      "status": "complete",
+      "startedAt": 1795087124757,
+      "completedAt": 1795087124757,
+      "durationMs": 0,
+      "details": "4 test case(s) planned — review on the dashboard, then start verification"
+    },
+    {
+      "n": 5,
+      "name": "Environment Preparation",
+      "status": "complete",
+      "startedAt": 1795087123999,
+      "completedAt": 1795087124252,
+      "durationMs": 253,
+      "details": "environment captured from the real machine via journaled commands"
+    },
+    {
+      "n": 6,
+      "name": "Test Execution",
+      "status": "complete",
+      "startedAt": 1795087125144,
+      "completedAt": 1795087161598,
+      "durationMs": 36454,
+      "details": "4 executed · 4 passed · 0 failed · 0 errors"
+    },
+    {
+      "n": 7,
+      "name": "Result Analysis",
+      "status": "complete",
+      "startedAt": 1795087161598,
+      "completedAt": 1795087217215,
+      "durationMs": 55617,
+      "details": "All 4 bridge cases passed against real executions on the user's machine (first round). Measured: V0 on real SQLite (user machine, Python 3.14.4, sqlite 3.46.1) the N+1 loop pattern executes exactly 50 — engine decision: VERIFIED"
+    },
+    {
+      "n": 8,
+      "name": "Regression Testing",
+      "status": "skipped",
+      "startedAt": null,
+      "completedAt": null,
+      "durationMs": null,
+      "details": "no regression round requested — skipped"
+    },
+    {
+      "n": 9,
+      "name": "Final Verification",
+      "status": "complete",
+      "startedAt": 1795087217215,
+      "completedAt": 1795087217215,
+      "durationMs": 0,
+      "details": "all 4 critical test(s) passed against real executions"
+    },
+    {
+      "n": 10,
+      "name": "Report Generation",
+      "status": "pending",
+      "startedAt": null,
+      "completedAt": null,
+      "durationMs": null,
+      "details": ""
+    }
+  ],
+  "statistics": {
+    "planned": 4,
+    "generated": 4,
+    "executed": 4,
+    "passed": 4,
+    "failed": 0,
+    "skipped": 0,
+    "blocked": 0,
+    "errors": 0,
+    "attempts": 4,
+    "iterations": 1,
+    "passRate": 100
+  },
+  "testCases": [
+    {
+      "id": "VTC-000022",
+      "name": "V0 N+1 measurement: loop pattern grows (N+1), single JOIN constant (1)",
+      "objective": "verify the record's core MEASURE-FIRST claim on real SQLite: query count grows linearly with rows for the loop pattern and stays constant for the batched read",
+      "category": "unit",
+      "round": 1,
+      "critical": true,
+      "expected": {
+        "expectedResult": "V0-NPLUS1-CONFIRMED with exact counts 501 vs 1",
+        "successCriteria": "exit 0, loop executes exactly N+1=501 queries, JOIN exactly 1, loop slower",
+        "failureCriteria": "counts differ or latency relationship not reproduced"
+      },
+      "criteria": {
+        "exitCode": 0,
+        "outputContains": [
+          "V0-NPLUS1-CONFIRMED"
+        ],
+        "outputNotContains": []
+      },
+      "command": "python3 knowledge/verification/sandbox/VRUN-000005/v0_nplus1_counts.py",
+      "finalStatus": "PASS",
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "PASS",
+          "exitCode": 0,
+          "timedOut": false,
+          "durationMs": 99,
+          "startedAt": "2026-11-19T11:18:45.336Z",
+          "journalRef": "d73ag6pj",
+          "note": "exit 0 + 1 output assertion(s) satisfied",
+          "output": "$ python3 knowledge/verification/sandbox/VRUN-000005/v0_nplus1_counts.py\nV0 rows: 500 parents x 3 children\nV0 N+1 loop pattern: 501 queries, 15.9 ms\nV0 single JOIN:      1 query,  0.6 ms\nV0 query-count growth: loop = N+1 = 501 (observed 501), join = 1 (observed 1)\nV0 latency: loop slower than join = True (26.3x)\nV0-NPLUS1-CONFIRMED\nexit code: 0"
+        }
+      ]
+    },
+    {
+      "id": "VTC-000023",
+      "name": "V2 SQLite locking experiment: lock error, busy timeout, WAL concurrency",
+      "objective": "verify the corrected locking explanation experimentally: second writer blocked during an open write transaction; busy timeout defers; WAL allows readers during a pending write while writers still serialize",
+      "category": "integration",
+      "round": 1,
+      "critical": true,
+      "expected": {
+        "expectedResult": "V2-SQLITE-LOCK-CONFIRMED with all four observations",
+        "successCriteria": "exit 0, 'database is locked' with short timeout, success with real timeout, WAL reader proceeds, WAL second writer blocked",
+        "failureCriteria": "any of the four locking observations not reproduced"
+      },
+      "criteria": {
+        "exitCode": 0,
+        "outputContains": [
+          "V2-SQLITE-LOCK-CONFIRMED"
+        ],
+        "outputNotContains": []
+      },
+      "command": "python3 knowledge/verification/sandbox/VRUN-000005/v2_sqlite_locking.py",
+      "finalStatus": "PASS",
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "PASS",
+          "exitCode": 0,
+          "timedOut": false,
+          "durationMs": 1027,
+          "startedAt": "2026-11-19T11:18:45.674Z",
+          "journalRef": "5ga8jy45",
+          "note": "exit 0 + 1 output assertion(s) satisfied",
+          "output": "$ python3 knowledge/verification/sandbox/VRUN-000005/v2_sqlite_locking.py\nV2 default journal mode: delete\nV2 sqlite library version: 3.46.1\nV2 phase1: writer B (0.25s busy timeout) while A holds write txn -> 'database is locked'\nV2 phase1: writer B (3s busy timeout) succeeds after A commits -> 'ok'\nV2 phase2: journal_mode set to wal\nV2 phase2: reader during pending write -> 'ok rows=3'\nV2 phase2: second writer during pending write -> 'database is locked'\nV2-SQLITE-LOCK-CONFIRMED\nexit code: 0"
+        }
+      ]
+    },
+    {
+      "id": "VTC-000024",
+      "name": "V1 doc-based: SQLite lock states, WAL one-writer, busy handler (live fetch)",
+      "objective": "verify the corrected locking explanation against the ACTUAL official SQLite documentation",
+      "category": "validation",
+      "round": 1,
+      "critical": true,
+      "expected": {
+        "expectedResult": "V1-DOC-VERIFIED with quotes from lockingv3, wal and busy_timeout pages",
+        "successCriteria": "exit 0, RESERVED/PENDING state definitions found, one-writer-at-a-time found, busy-handler statement found",
+        "failureCriteria": "doc fetch fails or documented statements differ from the record's explanation"
+      },
+      "criteria": {
+        "exitCode": 0,
+        "outputContains": [
+          "V1-DOC-VERIFIED"
+        ],
+        "outputNotContains": []
+      },
+      "command": "bash knowledge/verification/sandbox/VRUN-000005/v1_sqlite_docs.sh",
+      "finalStatus": "PASS",
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "PASS",
+          "exitCode": 0,
+          "timedOut": false,
+          "durationMs": 6115,
+          "startedAt": "2026-11-19T11:18:47.159Z",
+          "journalRef": "c1ivlnfy",
+          "note": "exit 0 + 1 output assertion(s) satisfied",
+          "output": "$ bash knowledge/verification/sandbox/VRUN-000005/v1_sqlite_docs.sh\nDOC-SOURCE-1: https://www.sqlite.org/lockingv3.html\nDOC-reserved-state: FOUND\nDOC-pending-state: FOUND\nDOC-QUOTE-exclusive: An EXCLUSIVE lock is needed in order to write to the database file\nDOC-QUOTE-reserved: RESERVED lock means that the process is planning on writing to the database file at some point in the future but that it is currently just reading from the file.\nDOC-SOURCE-2: https://www.sqlite.org/wal.html\nDOC-wal-one-writer: FOUND\nDOC-QUOTE-wal:  However, since there is only one WAL file, there can only be one writer at a time.\nDOC-QUOTE-wal-concurrency:  WAL provides more concurrency as readers do not block writers and a writer does not block readers.\nDOC-QUOTE-wal-concurrency:  Sometimes Queries Return SQLITE_BUSY In WAL Mode The second advantage of WAL-mode is that writers do not block readers and readers do not block writers.\nDOC-SOURCE-3: https://www.sqlite.org/c3ref/busy_timeout.html\nDOC-busy-handler: FOUND\nV1-DOC-VERIFIED\nexit code: 0"
+        }
+      ]
+    },
+    {
+      "id": "VTC-000025",
+      "name": "V4 doc-based: Prisma v6 query logging + N+1 definition + batching nuance (live fetch)",
+      "objective": "verify against the ACTUAL official Prisma v6 docs (installed major version): logging configuration, the n+1 definition, and the documented batching nuance",
+      "category": "validation",
+      "round": 1,
+      "critical": true,
+      "expected": {
+        "expectedResult": "V4-DOC-VERIFIED with quotes from the logging and query-optimization pages",
+        "successCriteria": "exit 0, logging constructor + log array + events found, n+1 definition found, findMany batching nuance found",
+        "failureCriteria": "doc fetch fails or documented statements differ"
+      },
+      "criteria": {
+        "exitCode": 0,
+        "outputContains": [
+          "V4-DOC-VERIFIED"
+        ],
+        "outputNotContains": []
+      },
+      "command": "bash knowledge/verification/sandbox/VRUN-000005/v4_prisma_docs.sh",
+      "finalStatus": "PASS",
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "PASS",
+          "exitCode": 0,
+          "timedOut": false,
+          "durationMs": 27328,
+          "startedAt": "2026-11-19T11:18:53.553Z",
+          "journalRef": "imlmfg1h",
+          "note": "exit 0 + 1 output assertion(s) satisfied",
+          "output": "$ bash knowledge/verification/sandbox/VRUN-000005/v4_prisma_docs.sh\nDOC-SOURCE-1: https://www.prisma.io/docs/orm/v6/prisma-client/observability-and-logging/logging\nDOC-logging-constructor: FOUND\nDOC-logging-log-array: FOUND\nDOC-logging-events: FOUND\nDOC-QUOTE-logging: The simplest way to print all log levels to stdout is to pass in an array LogLevel objects: const prisma = new PrismaClient ({ log: [ \"query\" , \"info\" , \"warn\" , \"error\" ], }); This is the short form of passing in an array of LogDefinition objects where the value of emit is always stdout : const prisma = new PrismaClient ({ log: [ { emit: \"stdout\" , level: \"query\" , }, { emit: \"stdout\" , level: \"error\" , }, { emit: \"stdout\" , level: \"info\" , }, { emit: \"stdout\" , level: \"warn\" , }, ], }); Event-based logging To use event-based logging: Set emit to event for a specific log level, such as query Use the $on() method to subscribe to the event The following example subscribes to all query events and write the duration and query to console: Relational databases const prisma = new PrismaClient ({ log: [ { emit: \"event\" , level: \"query\" , }, { emit: \"stdout\" , level: \"error\" , }, { emit: \"stdout\" , level: \"info\" , }, { emit: \"stdout\" , level: \"warn\" , }, ], }); prisma.\nDOC-SOURCE-2: https://www.prisma.io/docs/orm/v6/prisma-client/queries/query-optimization-performance\nDOC-nplus1-definition: FOUND\nDOC-dataloader-batching-nuance: FOUND\nDOC-QUOTE-nplus1: The n+1 problem occurs when you loop through the results of a query and perform one additional query per result , resulting in n number of queries plus the original (n+1).\nDOC-QUOTE-batching: posts() ) to return posts is that the dataloader in Prisma Client batches findUnique() queries and does not currently batch findMany() queries .\nV4-DOC-VERIFIED\nexit code: 0"
+        }
+      ]
+    }
+  ],
+  "metrics": [
+    {
+      "id": "VMET-000027",
+      "runId": "VRUN-000005",
+      "testCaseId": "VTC-000022",
+      "name": "nplus1_loop_queries_at_500_rows",
+      "value": "501",
+      "unit": "queries",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T11:20:17.214Z"
+    },
+    {
+      "id": "VMET-000028",
+      "runId": "VRUN-000005",
+      "testCaseId": "VTC-000022",
+      "name": "join_queries_at_500_rows",
+      "value": "1",
+      "unit": "queries",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T11:20:17.215Z"
+    },
+    {
+      "id": "VMET-000029",
+      "runId": "VRUN-000005",
+      "testCaseId": "VTC-000022",
+      "name": "loop_to_join_latency_ratio",
+      "value": "26.3",
+      "unit": "x",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T11:20:17.215Z"
+    },
+    {
+      "id": "VMET-000030",
+      "runId": "VRUN-000005",
+      "testCaseId": "VTC-000023",
+      "name": "sqlite_library_version_user_machine",
+      "value": "3.46.1",
+      "unit": "version",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T11:20:17.215Z"
+    },
+    {
+      "id": "VMET-000031",
+      "runId": "VRUN-000005",
+      "testCaseId": null,
+      "name": "prisma_loop_queries_10_rows_sandbox",
+      "value": "11",
+      "unit": "queries",
+      "source": "reported",
+      "verified": false,
+      "recordedAt": "2026-11-19T11:20:17.215Z"
+    },
+    {
+      "id": "VMET-000032",
+      "runId": "VRUN-000005",
+      "testCaseId": null,
+      "name": "prisma_loop_queries_100_rows_sandbox",
+      "value": "101",
+      "unit": "queries",
+      "source": "reported",
+      "verified": false,
+      "recordedAt": "2026-11-19T11:20:17.215Z"
+    },
+    {
+      "id": "VMET-000033",
+      "runId": "VRUN-000005",
+      "testCaseId": null,
+      "name": "prisma_include_queries_constant_sandbox",
+      "value": "2",
+      "unit": "queries",
+      "source": "reported",
+      "verified": false,
+      "recordedAt": "2026-11-19T11:20:17.215Z"
+    }
+  ],
+  "analyses": [
+    {
+      "id": "VANA-1-mwngkxfj",
+      "round": 1,
+      "submittedBy": "GLM (z.ai web)",
+      "createdAt": "2026-11-19T11:20:17.215Z",
+      "summary": "All 4 bridge cases passed against real executions on the user's machine (first round). Measured: V0 on real SQLite (user machine, Python 3.14.4, sqlite 3.46.1) the N+1 loop pattern executes exactly 501 queries at 500 parents while the single JOIN executes 1 query, with the loop 26.3x slower (15.9ms vs 0.6ms) — query count is the primary signal and it grows with row count exactly as the record claims. V2 the locking experiment reproduced all four documented behaviors: with a 0.25s busy timeout a second writer receives 'database is locked' while another writer holds an open write transaction; with a 3s busy timeout the same write succeeds after the holder commits; after PRAGMA journal_mode=WAL a reader proceeds during a pending write ('ok rows=3') while a second writer is STILL blocked ('database is locked') — writers serialize even in WAL; the default journal mode was 'delete' (rollback journal). V1 the live-fetched official SQLite documentation (lockingv3.html, wal.html, busy_timeout.html) contains the RESERVED and PENDING lock-state definitions verbatim, 'since there is only one WAL file, there can only be one writer at a time', 'readers do not block writers and a writer does not block readers', and the busy-handler sleep semantics — the record's corrected locking explanation matches the documentation. V4 the live-fetched Prisma v6 documentation (observability-and-logging/logging, queries/query-optimization-performance) documents the new PrismaClient({log:['query',...]}) configuration, event-based logging via $on, defines the n+1 problem ('one additional query per result'), and states the batching nuance that the dataloader 'does not currently batch findMany() queries'. SUPPLEMENTARY (Z.ai sandbox VM, Prisma 6.19.2 — labeled, not bridge-executed): the loop pattern ran 11 queries at 10 rows growing to 101 at 100 rows, while findMany({include:{children:true}}) ran a CONSTANT 2 queries whose captured SQL is two batched SELECTs (parents, then children WHERE parentId IN (?..)) — NOT a single JOIN. This directly verifies the record's corrected claim that 'include = one JOIN' is NOT guaranteed: on this ORM version and provider it compiles to two batched queries, and the verifiable requirement is the constant query count.",
+      "comparison": "Every prediction matched: 501 vs 1 queries (exact), the four locking observations reproduced on the user's SQLite 3.46.1, all SQLite and Prisma doc assertions found verbatim with quotes preserved in the attempts, and the sandbox Prisma experiment confirmed constant-2-query include vs linear loop growth (11->101). The v1 original claim that include equals one JOIN is refuted for Prisma 6.19.2+SQLite (2 batched queries), exactly as the v2 revision predicted; the v1 denormalization depth rule was already removed in v2 and requires no evidence.",
+      "alternativeExplanations": "(1) The V3 Prisma experiment ran in the Z.ai sandbox VM (bun, Prisma 6.19.2 resolved from ^6.11.1), not on the user's machine (node absent) — its results are labeled supplementary and the raw output is preserved at scripts/verifications/exp010/v3-prisma-experiment-output.txt; they are evidence about Prisma 6.19.2's behavior, not about the user's runtime. (2) The Prisma SQLite connector doc page was fetched and inspected during design and contains NO locking/concurrency documentation — the locking claims are verified against SQLite's own docs (the authoritative source) instead; this is an honest scope note, not a gap in the record's claims. (3) The V4 doc quotes come from the live v6 docs; Prisma's behavior may change across major versions (the docs mention relationStrategy and dataloader evolution), which is precisely why the record mandates measuring query count rather than assuming SQL shape. (4) SQLite lock behavior was exercised through python's bundled sqlite (3.46.1 on the user machine); other builds could differ in busy-handler defaults, but the observed behavior matched the documented model exactly.",
+      "recommendedModifications": "The verified evidence supports the record's revised claims. For the owner's review: the record's step-2 caution is now backed by a concrete observation (Prisma 6.19.2 + SQLite compiles include to 2 batched queries, not a JOIN) that a future revision could cite; the corrected SQLite locking explanation is both doc-verified (sqlite.org quotes preserved in attempt VTA-000031) and experiment-verified (VTA-000030); and the removed denormalization rule needs no restoration.",
+      "proposedConclusion": {
+        "status": "VERIFIED",
+        "summary": "All 4 critical bridge cases passed on real executions on the user's machine: N+1 query counting (501 vs 1, 26.3x), the four SQLite locking behaviors (lock error, busy timeout, WAL reader concurrency, WAL writer serialization), the SQLite documentation lock-state/WAL/busy-handler statements, and the Prisma v6 logging + N+1 + batching-nuance documentation. Supplementary sandbox evidence (Prisma 6.19.2) confirms include compiles to a constant 2 batched queries, not a single JOIN. The one environmental limitation: Prisma runtime behavior was not executable on the user's machine itself (node absent) — the sandbox experiment stands in, clearly labeled."
+      },
+      "engineDecision": {
+        "accepted": true,
+        "effectiveStatus": "VERIFIED",
+        "reason": "GLM's proposal matches the evidence: all 4 critical test(s) passed against real executions"
+      },
+      "metricIds": [
+        "VMET-000027",
+        "VMET-000028",
+        "VMET-000029",
+        "VMET-000030",
+        "VMET-000031",
+        "VMET-000032",
+        "VMET-000033"
+      ]
+    }
+  ],
+  "feedback": [],
+  "limitations": [
+    "Commands executed on the user's machine through the VS Code extension as the local user — no CPU/memory sandbox isolation is enforceable through this transport.",
+    "Network access for non-flagged tests could not be technically blocked; tests that declared network needs required explicit owner confirmation instead.",
+    "Attempt outputs are redacted for secrets and capped at 20,000 characters per attempt."
+  ]
+}

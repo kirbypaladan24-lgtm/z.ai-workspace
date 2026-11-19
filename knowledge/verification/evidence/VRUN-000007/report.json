@@ -1,0 +1,474 @@
+{
+  "id": "RPT-VRUN-000007",
+  "runId": "VRUN-000007",
+  "knowledge": {
+    "id": "EXP-000012",
+    "version": 2,
+    "title": "AI-operator self-correction: minimal surgical edits, one change per cycle, revert before the next attempt — the antidote to overthinking",
+    "solutionUnderTest": "1) Make the smallest edit that plausibly addresses the CAUSE (anchored edit, not file rewrite). 2) ONE change per cycle; re-run the exact failing check after each change — that result is the only progress signal. 3) SELECTIVE, SAFE ROLLBACK — never blanket restores: BEFORE the first edit, capture the pre-edit content of ONLY the file(s) you are about to touch (bridge read_file, or git diff to enumerate hunks). On a failed attempt, restore exactly what you changed: git restore -p (choose your hunks), a path-limited stash (git stash push -- <paths>), or re-apply the captured pre-edit content. NEVER run repo-wide git checkout . / git reset --hard — they destroy the user's unrelated uncommitted work. If the file had PRE-EXISTING uncommitted changes, prefer restoring just your hunks over any file-level restore. CONFIRM the rollback: re-run the exact failing check — the ORIGINAL error must reproduce; that is your known-green marker. 4) CONTINUATION CRITERIA — there is no fixed attempt count. Continue surgical attempts while: (a) each attempt tests a NEW hypothesis informed by the actual error text of the previous failure; (b) the diff stays anchored at the failure site; (c) the error is changing or moving (progress signal). STOP and surface the situation to the user when: attempts repeat the same hypothesis with no new information; the diff keeps growing past the causal site; or you can no longer attribute which change did what. 5) Re-read the file after editing to confirm the edit landed as intended. 6) Re-read the ACTUAL error text (not the assumed one) before each next attempt; reduce to a minimal reproduction when the system resists. 7) Reserve full-file rewrites for files whose STRUCTURE is itself the demonstrated cause — not merely because surgical attempts failed: require structural evidence or exhausted-information signals from step 4, and surface the rewrite decision to the user whenever the blast radius is non-trivial.\n\nVERIFICATION PLAN (PLANNED — NOT EXECUTED; no evidence exists for v2 claims yet): V1 experimental (git; scratch repo in a temp dir via mktemp -d so nothing is written into the user's workspace): seed a repo with pre-existing uncommitted changes; apply an agent-style edit; exercise the selective rollback (git restore -p / git stash push -- <path>) and verify the user's pre-existing changes SURVIVE while the agent's edit is gone; negative control: show that repo-wide git checkout . destroys them — the reason it is banned. V2 doc-based (NOT yet inspected): git restore -p and path-limited stash semantics. V3 practice-based: the continuation criteria are process guidance, not mechanically testable claims."
+  },
+  "generatedAt": "2026-11-19T11:32:06.823Z",
+  "generatedBy": "bridge report generator (assembled from persisted execution records)",
+  "verificationStatus": "VERIFIED",
+  "conclusion": {
+    "status": "VERIFIED",
+    "summary": "all 5 critical test(s) passed against real executions",
+    "glmInterpretation": "All 5 critical cases passed against real executions on the user's machine (round 2; round 1 preserved one failed attempt VTA-000039 whose cause was a case-definition flaw — man-page line wrapping broke a literal substring match — fixed by normalizing whitespace, no assertion weakened). Measured: V1a path-limited `git restore -- lib.js` removed exactly the agent's failed edit (plus its scratch file) while the USER's uncommitted WIP in app.js survived, and the ORIGINAL failing check reproduced after rollback (the record's known-green confirmation marker). V1b `git stash push -- lib.js` achieved the same guarantees with the stashed change recoverable in the stash list. V1c (negative control) the banned repo-wide `git checkout -- .` destroyed the user's uncommitted WIP along with the agent's edit — the demonstrated blast radius justifying the record's ban. V1d when the user's WIP and the agent's edit shared ONE file, the record's prescribed content-capture path (capture pre-edit content before the first edit, re-apply on failure) restored the user's hunk, removed the agent's hunk, and left the working tree at exactly the user's WIP (git diff non-empty, no agent content). V2 the locally installed git 2.53.0's own documentation (man git-restore, man git-stash) documents 'Restore working tree files', 'Restore specified paths in the working tree with some contents from a restore source', 'Interactively select hunks' (patch mode), 'new stash entry', 'pathspec', and the stash-push pathspec synopsis — the selective-rollback semantics are exactly as the record describes.",
+    "stats": {
+      "planned": 5,
+      "generated": 5,
+      "executed": 5,
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0,
+      "blocked": 0,
+      "errors": 0,
+      "attempts": 6,
+      "iterations": 2,
+      "passRate": 100
+    },
+    "decidedAt": "2026-11-19T11:32:06.526Z",
+    "decidedBy": "bridge-evaluator (evidence-based)"
+  },
+  "originalProblem": {
+    "description": "EXP-000012 (latest version v2, the technical revision) claims: (1) rollback must be SELECTIVE and SAFE — restore exactly what the agent changed (git restore -- <path>, git stash push -- <paths>, or re-apply captured pre-edit content), never repo-wide git checkout . / git reset --hard which destroy the user's unrelated uncommitted work; (2) when the agent's edit and the user's pre-existing WIP share ONE file, prefer restoring just the agent's hunks — the content-capture path (capture before the first edit, re-apply on failure) is the non-interactive mechanism; (3) the rollback must be CONFIRMED by re-running the exact failing check — the ORIGINAL error must reproduce as the known-green marker; (4) git restore -p and path-limited stash semantics are doc-verifiable. The v2 revision REMOVED the arbitrary two-attempt rewrite threshold (continuation is governed by information gain — process guidance, plan item V3, not mechanically testable per the record itself).",
+    "symptoms": "agent rewrites spiral; user's uncommitted work destroyed by blanket restores; failed fixes stacked on unknown state; loss of attribution",
+    "expectedBehavior": "V1a: after a failed agent edit, `git restore -- lib.js` (plus removing the agent's scratch file) leaves the USER's uncommitted WIP in app.js intact, removes exactly the agent's edit, and the ORIGINAL failing check reproduces. V1b: `git stash push -- lib.js` achieves the same with the change recoverable in the stash. V1c (negative control): the banned `git checkout -- .` destroys the user's WIP along with the agent's edit. V1d: when user WIP and the agent edit share one file, capturing the pre-edit content BEFORE the edit and re-applying it on failure restores the user's hunk and removes the agent's hunk, leaving the working tree at exactly the user's WIP. V2: the locally installed git documentation (man git-restore / man git-stash for git 2.53.0) documents path-scoped working-tree restore, interactive hunk selection, and stash push with pathspec.",
+    "actualBehavior": "to be measured by real execution on the user's machine through the bridge",
+    "facts": "git restore restores specified paths in the working tree from a restore source (default: the index); git stash push accepts pathspecs; the user's machine has git 2.53.0 with local man pages (phrases pre-verified via bridge probes); all experiments run in mktemp scratch dirs — nothing in the user's workspace is touched.",
+    "assumptions": "git 2.53.0 semantics match the VM dry-run environment (git 2.47.3) for the operations used (restore, stash push with pathspec, checkout -- .); man pages are present on the user's machine (verified by probe).",
+    "environment": "user's machine via the bridge extension: Linux, git 2.53.0, local man pages; VM dry-runs on git 2.47.3",
+    "constraints": "every experiment writes only to mktemp -d scratch dirs (removed on exit); no workspace files touched; V2 uses local documentation (no network); outputs below the 20KB truncation limit."
+  },
+  "hypothesis": {
+    "text": "All five cases pass on real execution: the two selective mechanisms (path-limited restore, path-limited stash) preserve the user's uncommitted work while removing exactly the agent's edit and reproducing the original error; the banned blanket restore demonstrably destroys user work; the content-capture path handles the mixed-file case leaving the working tree at exactly the user's WIP; and the installed git's own documentation states the path-scoped restore and stash-pathspec semantics.",
+    "expectedObservation": "markers: V1a-SELECTIVE-RESTORE-VERIFIED, V1b-PATH-LIMITED-STASH-VERIFIED, V1c-BLANKET-RESTORE-DAMAGE-CONFIRMED, V1d-CONTENT-CAPTURE-ROLLBACK-VERIFIED, V2-DOC-VERIFIED",
+    "supportingEvidence": "VM dry-runs (git 2.47.3) reproduce all four experimental markers; all V2 man-page phrases were pre-verified present on the user's machine via bridge probes (git-restore: 'Restore working tree files', 'Restore specified paths in the working tree with some contents from a restore source', 'Interactively select hunks'; git-stash: 'new stash entry', 'pathspec', 'stash push ... pathspec').",
+    "contradictingEvidence": "none observed in dry-runs; V2 cannot be dry-run in the VM (no git man pages there) — its phrases were verified directly on the target machine instead."
+  },
+  "hypothesisHistory": [
+    {
+      "n": 1,
+      "kind": "initial",
+      "hypothesis": "All five cases pass on real execution: the two selective mechanisms (path-limited restore, path-limited stash) preserve the user's uncommitted work while removing exactly the agent's edit and reproducing the original error; the banned blanket restore demonstrably destroys user work; the content-capture path handles the mixed-file case leaving the working tree at exactly the user's WIP; and the installed git's own documentation states the path-scoped restore and stash-pathspec semantics.",
+      "expectedObservation": "markers: V1a-SELECTIVE-RESTORE-VERIFIED, V1b-PATH-LIMITED-STASH-VERIFIED, V1c-BLANKET-RESTORE-DAMAGE-CONFIRMED, V1d-CONTENT-CAPTURE-ROLLBACK-VERIFIED, V2-DOC-VERIFIED",
+      "changeNote": "initial hypothesis",
+      "createdAt": "2026-11-19T11:30:45.319Z",
+      "outcome": "4/5 executed tests passed (pass rate 80%)"
+    },
+    {
+      "n": 2,
+      "kind": "regression",
+      "hypothesis": "The V2 failure was a case-definition flaw, not a documentation mismatch: the man page hard-wraps the sentence 'Restore specified paths in the working tree with some contents from a restore source' across two lines, so the literal single-line grep missed it (the probe had verified the phrase exists, split by the wrap). Normalizing newlines/whitespace before matching makes all six assertions pass without weakening any of them.",
+      "expectedObservation": "V2-DOC-VERIFIED with all six phrases FOUND",
+      "changeNote": "root cause: man-page line wrapping broke a literal substring match (attempt VTA-000039 preserved: 5/6 phrases found, the wrapped one missed). Fix: the case command now pipes the man output through tr '\\n' ' ' + squeeze before matching; the sandbox script was restaged with the identical normalization. No assertion was weakened.",
+      "createdAt": "2026-11-19T11:31:33.364Z",
+      "outcome": "5/5 executed tests passed (pass rate 100%)"
+    }
+  ],
+  "strategy": "Five cases, all staged in the run sandbox: V1a/V1b selective rollback mechanisms, V1c the banned-command negative control, V1d the mixed-file content-capture path, V2 local documentation inspection (man pages of the installed git). V3 (continuation criteria) is process guidance per the record's own plan and is not mechanically testable — no case, noted in the analysis.\n\nExperiments: Five sandbox-staged cases: four git experiments in mktemp scratch repos (selective restore, path-limited stash, banned-command negative control, mixed-file content capture) plus a local man-page documentation inspection of the installed git. V3 (continuation criteria) is process guidance per the record's own plan — not mechanically testable.",
+  "environment": {
+    "capturedAt": 1795087845788,
+    "os": "Linux kirby-LOQ-15IAX9E 7.0.0-43-generic #43-Ubuntu SMP PREEMPT_DYNAMIC Fri Oct 23 13:25:25 UTC 2026 x86_64 GNU/Linux\nexit code: 0",
+    "runtimes": "Python 3.14.4\n/bin/bash: line 1: node: command not found\ngit version 2.53.0\n3.46.1 2024-08-13 09:16:08 c9c2ab54ba1f5f46360f1b4f35d849cd3f080e6fc2b6c60e91b16c63f69aalt1 (64-bit)\nexit code: 0",
+    "sourceRevision": "6c04b92",
+    "journalRefs": [
+      "qzc4kxjx",
+      "wanfq3zh",
+      "4xujt4ko"
+    ]
+  },
+  "reproducibility": {
+    "os": "Linux kirby-LOQ-15IAX9E 7.0.0-43-generic #43-Ubuntu SMP PREEMPT_DYNAMIC Fri Oct 23 13:25:25 UTC 2026 x86_64 GNU/Linux\nexit code: 0",
+    "runtimes": "Python 3.14.4\n/bin/bash: line 1: node: command not found\ngit version 2.53.0\n3.46.1 2024-08-13 09:16:08 c9c2ab54ba1f5f46360f1b4f35d849cd3f080e6fc2b6c60e91b16c63f69aalt1 (64-bit)\nexit code: 0",
+    "sourceRevision": "6c04b92",
+    "testCommands": [
+      {
+        "id": "VTC-000028",
+        "command": "bash knowledge/verification/sandbox/VRUN-000007/v1a_restore_selective.sh",
+        "timeoutMs": 60000
+      },
+      {
+        "id": "VTC-000029",
+        "command": "bash knowledge/verification/sandbox/VRUN-000007/v1b_stash_pathlimited.sh",
+        "timeoutMs": 60000
+      },
+      {
+        "id": "VTC-000030",
+        "command": "bash knowledge/verification/sandbox/VRUN-000007/v1c_negative_checkout.sh",
+        "timeoutMs": 60000
+      },
+      {
+        "id": "VTC-000031",
+        "command": "bash knowledge/verification/sandbox/VRUN-000007/v1d_content_capture.sh",
+        "timeoutMs": 60000
+      },
+      {
+        "id": "VTC-000032",
+        "command": "bash knowledge/verification/sandbox/VRUN-000007/v2_git_docs.sh",
+        "timeoutMs": 60000
+      }
+    ],
+    "note": "Re-run the listed commands in the recorded environment to reproduce. All outputs below were captured by the bridge from real executions."
+  },
+  "timeline": [
+    {
+      "n": 1,
+      "name": "Problem Analysis",
+      "status": "complete",
+      "startedAt": 1795087845319,
+      "completedAt": 1795087845319,
+      "durationMs": 0,
+      "details": "problem, symptoms, expected vs actual behavior, facts and assumptions recorded"
+    },
+    {
+      "n": 2,
+      "name": "Hypothesis Formulation",
+      "status": "complete",
+      "startedAt": 1795087845319,
+      "completedAt": 1795087845319,
+      "durationMs": 0,
+      "details": "All five cases pass on real execution: the two selective mechanisms (path-limited restore, path-limited stash) preserve the user's uncommitted work while removing exactly the agent's edit and reproducing the original error; the banned blanket restore demonstrably destroys user work; the content-capt… (491 chars)"
+    },
+    {
+      "n": 3,
+      "name": "Experiment Design",
+      "status": "complete",
+      "startedAt": 1795087847401,
+      "completedAt": 1795087847401,
+      "durationMs": 0,
+      "details": "Five sandbox-staged cases: four git experiments in mktemp scratch repos (selective restore, path-limited stash, banned-command negative control, mixed-file content capture) plus a local man-page documentation inspection of the installed git. V3 (continuation criteria) is process guidance per the rec… (343 chars)"
+    },
+    {
+      "n": 4,
+      "name": "Test Plan Generation",
+      "status": "complete",
+      "startedAt": 1795087847401,
+      "completedAt": 1795087847401,
+      "durationMs": 0,
+      "details": "5 test case(s) planned — review on the dashboard, then start verification"
+    },
+    {
+      "n": 5,
+      "name": "Environment Preparation",
+      "status": "complete",
+      "startedAt": 1795087845319,
+      "completedAt": 1795087845788,
+      "durationMs": 469,
+      "details": "environment captured from the real machine via journaled commands"
+    },
+    {
+      "n": 6,
+      "name": "Test Execution",
+      "status": "complete",
+      "startedAt": 1795087848476,
+      "completedAt": 1795087894630,
+      "durationMs": 46154,
+      "details": "5 executed · 5 passed · 0 failed · 0 errors"
+    },
+    {
+      "n": 7,
+      "name": "Result Analysis",
+      "status": "running",
+      "startedAt": 1795087894630,
+      "completedAt": null,
+      "durationMs": null,
+      "details": "awaiting GLM result analysis (bridge-validated)…"
+    },
+    {
+      "n": 8,
+      "name": "Regression Testing",
+      "status": "complete",
+      "startedAt": 1795087893364,
+      "completedAt": 1795087926526,
+      "durationMs": 33162,
+      "details": "regression round 2 analyzed: 5/5 passed"
+    },
+    {
+      "n": 9,
+      "name": "Final Verification",
+      "status": "complete",
+      "startedAt": 1795087926526,
+      "completedAt": 1795087926526,
+      "durationMs": 0,
+      "details": "all 5 critical test(s) passed against real executions"
+    },
+    {
+      "n": 10,
+      "name": "Report Generation",
+      "status": "pending",
+      "startedAt": null,
+      "completedAt": null,
+      "durationMs": null,
+      "details": ""
+    }
+  ],
+  "statistics": {
+    "planned": 5,
+    "generated": 5,
+    "executed": 5,
+    "passed": 5,
+    "failed": 0,
+    "skipped": 0,
+    "blocked": 0,
+    "errors": 0,
+    "attempts": 6,
+    "iterations": 2,
+    "passRate": 100
+  },
+  "testCases": [
+    {
+      "id": "VTC-000028",
+      "name": "V1a path-limited git restore: user WIP survives, agent edit gone, original error reproduces",
+      "objective": "verify the record's primary selective-rollback mechanism end to end in a scratch repo",
+      "category": "unit",
+      "round": 1,
+      "critical": true,
+      "expected": {
+        "expectedResult": "V1a-SELECTIVE-RESTORE-VERIFIED",
+        "successCriteria": "exit 0, user WIP intact, agent edit reverted, original error reproduced",
+        "failureCriteria": "user work lost, agent edit survives, or the check outcome changes"
+      },
+      "criteria": {
+        "exitCode": 0,
+        "outputContains": [
+          "V1a-SELECTIVE-RESTORE-VERIFIED"
+        ],
+        "outputNotContains": []
+      },
+      "command": "bash knowledge/verification/sandbox/VRUN-000007/v1a_restore_selective.sh",
+      "finalStatus": "PASS",
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "PASS",
+          "exitCode": 0,
+          "timedOut": false,
+          "durationMs": 290,
+          "startedAt": "2026-11-19T11:30:48.911Z",
+          "journalRef": "cmkpgxbh",
+          "note": "exit 0 + 1 output assertion(s) satisfied",
+          "output": "$ bash knowledge/verification/sandbox/VRUN-000007/v1a_restore_selective.sh\nV1a confirm: original error reproduced after rollback (known-green marker)\nV1a-user-wip-survived: YES\nV1a-agent-edit-gone: YES\nV1a-SELECTIVE-RESTORE-VERIFIED\nexit code: 0"
+        }
+      ]
+    },
+    {
+      "id": "VTC-000029",
+      "name": "V1b path-limited stash: same guarantees, change recoverable",
+      "objective": "verify git stash push -- <path> as the alternative selective rollback",
+      "category": "unit",
+      "round": 1,
+      "critical": true,
+      "expected": {
+        "expectedResult": "V1b-PATH-LIMITED-STASH-VERIFIED",
+        "successCriteria": "exit 0, user WIP intact, agent edit stashed (recoverable), original error reproduced",
+        "failureCriteria": "any guarantee broken"
+      },
+      "criteria": {
+        "exitCode": 0,
+        "outputContains": [
+          "V1b-PATH-LIMITED-STASH-VERIFIED"
+        ],
+        "outputNotContains": []
+      },
+      "command": "bash knowledge/verification/sandbox/VRUN-000007/v1b_stash_pathlimited.sh",
+      "finalStatus": "PASS",
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "PASS",
+          "exitCode": 0,
+          "timedOut": false,
+          "durationMs": 242,
+          "startedAt": "2026-11-19T11:30:50.249Z",
+          "journalRef": "58ooo5em",
+          "note": "exit 0 + 1 output assertion(s) satisfied",
+          "output": "$ bash knowledge/verification/sandbox/VRUN-000007/v1b_stash_pathlimited.sh\nV1b confirm: original error reproduced after path-limited stash\nV1b-user-wip-survived: YES\nV1b-agent-edit-gone: YES\nV1b-stashed-change-recoverable: YES\nV1b-PATH-LIMITED-STASH-VERIFIED\nexit code: 0"
+        }
+      ]
+    },
+    {
+      "id": "VTC-000030",
+      "name": "V1c negative control: repo-wide git checkout . destroys user work (why it is banned)",
+      "objective": "demonstrate the blast radius of the banned blanket restore on the user's unrelated uncommitted work",
+      "category": "negative",
+      "round": 1,
+      "critical": true,
+      "expected": {
+        "expectedResult": "V1c-BLANKET-RESTORE-DAMAGE-CONFIRMED",
+        "successCriteria": "exit 0, user WIP destroyed by the banned command (damage demonstrated)",
+        "failureCriteria": "user work survives the blanket restore (the ban would be unjustified)"
+      },
+      "criteria": {
+        "exitCode": 0,
+        "outputContains": [
+          "V1c-BLANKET-RESTORE-DAMAGE-CONFIRMED"
+        ],
+        "outputNotContains": []
+      },
+      "command": "bash knowledge/verification/sandbox/VRUN-000007/v1c_negative_checkout.sh",
+      "finalStatus": "PASS",
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "PASS",
+          "exitCode": 0,
+          "timedOut": false,
+          "durationMs": 195,
+          "startedAt": "2026-11-19T11:30:51.450Z",
+          "journalRef": "hz07q7q4",
+          "note": "exit 0 + 1 output assertion(s) satisfied",
+          "output": "$ bash knowledge/verification/sandbox/VRUN-000007/v1c_negative_checkout.sh\nV1c-user-wip-after-banned-command: DESTROYED (user work lost)\nV1c-agent-edit-after-banned-command: gone\nV1c conclusion: the repo-wide rollback destroyed the USER's unrelated uncommitted work — the reason the record bans it\nV1c-BLANKET-RESTORE-DAMAGE-CONFIRMED\nexit code: 0"
+        }
+      ]
+    },
+    {
+      "id": "VTC-000031",
+      "name": "V1d mixed file: content-capture rollback preserves the user's hunk, removes the agent's",
+      "objective": "verify the record's prescribed mechanism when the agent's edit and the user's pre-existing WIP share one file (capture pre-edit content before the first edit, re-apply on failure)",
+      "category": "boundary",
+      "round": 1,
+      "critical": true,
+      "expected": {
+        "expectedResult": "V1d-CONTENT-CAPTURE-ROLLBACK-VERIFIED",
+        "successCriteria": "exit 0, user hunk intact, agent hunk gone, working tree at exactly the user's WIP, original error reproduced",
+        "failureCriteria": "either hunk mishandled"
+      },
+      "criteria": {
+        "exitCode": 0,
+        "outputContains": [
+          "V1d-CONTENT-CAPTURE-ROLLBACK-VERIFIED"
+        ],
+        "outputNotContains": []
+      },
+      "command": "bash knowledge/verification/sandbox/VRUN-000007/v1d_content_capture.sh",
+      "finalStatus": "PASS",
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "PASS",
+          "exitCode": 0,
+          "timedOut": false,
+          "durationMs": 120,
+          "startedAt": "2026-11-19T11:30:53.098Z",
+          "journalRef": "qtp2pes3",
+          "note": "exit 0 + 1 output assertion(s) satisfied",
+          "output": "$ bash knowledge/verification/sandbox/VRUN-000007/v1d_content_capture.sh\nV1d confirm: original error reproduced after content-capture rollback\nV1d-user-hunk-survived: YES\nV1d-agent-hunk-gone: YES\nV1d working tree: back to exactly the user's uncommitted WIP (git diff non-empty, no agent content)\nV1d-CONTENT-CAPTURE-ROLLBACK-VERIFIED\nexit code: 0"
+        }
+      ]
+    },
+    {
+      "id": "VTC-000032",
+      "name": "V2 doc-based: installed git's own man pages on restore/stash selectivity (local, no network)",
+      "objective": "verify against the ACTUAL documentation of the installed git 2.53.0: path-scoped working-tree restore, interactive hunk selection, stash push with pathspec",
+      "category": "validation",
+      "round": 1,
+      "critical": true,
+      "expected": {
+        "expectedResult": "V2-DOC-VERIFIED",
+        "successCriteria": "exit 0, all six documented phrases found in the local man pages",
+        "failureCriteria": "man pages unavailable or documented statements differ"
+      },
+      "criteria": {
+        "exitCode": 0,
+        "outputContains": [
+          "V2-DOC-VERIFIED"
+        ],
+        "outputNotContains": []
+      },
+      "command": "bash knowledge/verification/sandbox/VRUN-000007/v2_git_docs.sh",
+      "finalStatus": "PASS",
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "FAIL",
+          "exitCode": 1,
+          "timedOut": false,
+          "durationMs": 300,
+          "startedAt": "2026-11-19T11:30:53.963Z",
+          "journalRef": "up6b00fx",
+          "note": "exit code 1 ≠ expected 0",
+          "output": "$ bash knowledge/verification/sandbox/VRUN-000007/v2_git_docs.sh\nDOC-SOURCE-1: man git-restore (local documentation of the installed git 2.53.0)\nDOC-restore: FOUND: git-restore - Restore working tree files\nDOC-restore: MISSING: Restore specified paths in the working tree with some contents from a restore source\nDOC-restore: FOUND: Interactively select hunks\nDOC-SOURCE-2: man git-stash (local documentation of the installed git)\nDOC-stash: FOUND: new stash entry\nDOC-stash: FOUND: pathspec\nDOC-stash-push-pathspec-synopsis: FOUND\nV2-DOC-NOT-VERIFIED\nexit code: 1"
+        },
+        {
+          "attempt": 2,
+          "status": "PASS",
+          "exitCode": 0,
+          "timedOut": false,
+          "durationMs": 157,
+          "startedAt": "2026-11-19T11:31:34.162Z",
+          "journalRef": "901mc36c",
+          "note": "exit 0 + 1 output assertion(s) satisfied",
+          "output": "$ bash knowledge/verification/sandbox/VRUN-000007/v2_git_docs.sh\nDOC-SOURCE-1: man git-restore (local documentation of the installed git 2.53.0)\nDOC-restore: FOUND: git-restore - Restore working tree files\nDOC-restore: FOUND: Restore specified paths in the working tree with some contents from a restore source\nDOC-restore: FOUND: Interactively select hunks\nDOC-SOURCE-2: man git-stash (local documentation of the installed git)\nDOC-stash: FOUND: new stash entry\nDOC-stash: FOUND: pathspec\nDOC-stash-push-pathspec-synopsis: FOUND\nV2-DOC-VERIFIED\nexit code: 0"
+        }
+      ]
+    }
+  ],
+  "metrics": [
+    {
+      "id": "VMET-000041",
+      "runId": "VRUN-000007",
+      "testCaseId": "VTC-000028",
+      "name": "user_wip_preserved_selective",
+      "value": "YES",
+      "unit": "",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T11:32:06.526Z"
+    },
+    {
+      "id": "VMET-000042",
+      "runId": "VRUN-000007",
+      "testCaseId": "VTC-000030",
+      "name": "user_wip_after_blanket_restore",
+      "value": "DESTROYED",
+      "unit": "",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T11:32:06.526Z"
+    },
+    {
+      "id": "VMET-000043",
+      "runId": "VRUN-000007",
+      "testCaseId": "VTC-000031",
+      "name": "mixed_file_user_hunk_preserved",
+      "value": "YES",
+      "unit": "",
+      "source": "measured",
+      "verified": true,
+      "recordedAt": "2026-11-19T11:32:06.526Z"
+    }
+  ],
+  "analyses": [
+    {
+      "id": "VANA-1-mwnh04qm",
+      "round": 2,
+      "submittedBy": "GLM (z.ai web)",
+      "createdAt": "2026-11-19T11:32:06.526Z",
+      "summary": "All 5 critical cases passed against real executions on the user's machine (round 2; round 1 preserved one failed attempt VTA-000039 whose cause was a case-definition flaw — man-page line wrapping broke a literal substring match — fixed by normalizing whitespace, no assertion weakened). Measured: V1a path-limited `git restore -- lib.js` removed exactly the agent's failed edit (plus its scratch file) while the USER's uncommitted WIP in app.js survived, and the ORIGINAL failing check reproduced after rollback (the record's known-green confirmation marker). V1b `git stash push -- lib.js` achieved the same guarantees with the stashed change recoverable in the stash list. V1c (negative control) the banned repo-wide `git checkout -- .` destroyed the user's uncommitted WIP along with the agent's edit — the demonstrated blast radius justifying the record's ban. V1d when the user's WIP and the agent's edit shared ONE file, the record's prescribed content-capture path (capture pre-edit content before the first edit, re-apply on failure) restored the user's hunk, removed the agent's hunk, and left the working tree at exactly the user's WIP (git diff non-empty, no agent content). V2 the locally installed git 2.53.0's own documentation (man git-restore, man git-stash) documents 'Restore working tree files', 'Restore specified paths in the working tree with some contents from a restore source', 'Interactively select hunks' (patch mode), 'new stash entry', 'pathspec', and the stash-push pathspec synopsis — the selective-rollback semantics are exactly as the record describes.",
+      "comparison": "Every prediction matched: both selective mechanisms preserved user work while reverting exactly the agent's edit and reproducing the original error; the blanket restore destroyed user work; the mixed-file content-capture path left the tree at exactly the user's WIP; and all six documented phrases were found in the installed git's man pages after whitespace normalization.",
+      "alternativeExplanations": "(1) The experiments use crafted scratch repos in mktemp dirs — they verify git's MECHANICS, not any real repository of the user; the user's actual workspace was never touched. (2) git restore -p (interactive hunk selection) could not be exercised non-interactively; its semantics are doc-verified (V2: 'Interactively select hunks') and the non-interactive content-capture path (V1d) covers the same mixed-file requirement. (3) The VM dry-run environment runs git 2.47.3 while the user machine has 2.53.0 — all four experimental behaviors were identical on both, and the doc assertions target the user machine's own man pages. (4) V3 (continuation/stop criteria) is process guidance — the record's own plan classifies it as not mechanically testable; no case was created for it.",
+      "recommendedModifications": "The verified evidence supports the record's revised claims in full. For the owner's review: the two-attempt threshold removal is justified (V3 is guidance, not a rule); the selective-rollback safety property is now demonstrated for all three prescribed mechanisms (path restore, path stash, content capture) with the negative control showing why blanket restores are banned.",
+      "proposedConclusion": {
+        "status": "VERIFIED",
+        "summary": "All 5 critical test cases passed on real executions on the user's machine: path-limited restore and path-limited stash both preserve the user's uncommitted work while reverting exactly the agent's failed edit (original error reproducing as the known-green marker); the banned repo-wide checkout demonstrably destroys user work; the content-capture path handles the mixed-file case leaving the tree at exactly the user's WIP; and the installed git's own documentation states the selective semantics. The removed two-attempt threshold required no evidence (a removal, like EXP-000011's retracted superlative)."
+      },
+      "engineDecision": {
+        "accepted": true,
+        "effectiveStatus": "VERIFIED",
+        "reason": "GLM's proposal matches the evidence: all 5 critical test(s) passed against real executions"
+      },
+      "metricIds": [
+        "VMET-000041",
+        "VMET-000042",
+        "VMET-000043"
+      ]
+    }
+  ],
+  "feedback": [],
+  "limitations": [
+    "Commands executed on the user's machine through the VS Code extension as the local user — no CPU/memory sandbox isolation is enforceable through this transport.",
+    "Network access for non-flagged tests could not be technically blocked; tests that declared network needs required explicit owner confirmation instead.",
+    "Attempt outputs are redacted for secrets and capped at 20,000 characters per attempt."
+  ]
+}
