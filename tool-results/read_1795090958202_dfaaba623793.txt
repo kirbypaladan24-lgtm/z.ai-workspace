@@ -1,0 +1,602 @@
+     1→  1000→                      </FeedChip>
+     2→  1001→                    ))}
+     3→  1002→                  </div>
+     4→  1003→                  <div className="flex items-center flex-wrap">
+     5→  1004→                    {([
+     6→  1005→                      ['all', 'All'],
+     7→  1006→                      ['verified', 'Verified'],
+     8→  1007→                      ['candidate', 'Candidate'],
+     9→  1008→                      ['verification_pending', 'Verifying'],
+    10→  1009→                      ['rejected', 'Rejected'],
+    11→  1010→                      ['deprecated', 'Deprecated'],
+    12→  1011→                      ['archived', 'Archived'],
+    13→  1012→                    ] as [KnowledgeStatusFilter, string][]).map(([val, label]) => (
+    14→  1013→                      <FeedChip
+    15→  1014→                        key={val}
+    16→  1015→                        active={knowledgeStatusFilter === val}
+    17→  1016→                        onClick={() => setKnowledgeStatusFilter(val)}
+    18→  1017→                        testId={`knowledge-filter-status-${val}`}
+    19→  1018→                      >
+    20→  1019→                        {label}
+    21→  1020→                      </FeedChip>
+    22→  1021→                    ))}
+    23→  1022→                  </div>
+    24→  1023→                  {knowledgeCategories.length > 1 && (
+    25→  1024→                    <div className="flex items-center flex-wrap">
+    26→  1025→                      {knowledgeCategories.map((cat) => (
+    27→  1026→                        <FeedChip
+    28→  1027→                          key={cat}
+    29→  1028→                          active={knowledgeCategory === cat}
+    30→  1029→                          onClick={() => setKnowledgeCategory(knowledgeCategory === cat ? '' : cat)}
+    31→  1030→                          testId={`knowledge-filter-category-${cat}`}
+    32→  1031→                        >
+    33→  1032→                          {cat}
+    34→  1033→                        </FeedChip>
+    35→  1034→                      ))}
+    36→  1035→                    </div>
+    37→  1036→                  )}
+    38→  1037→                </div>
+    39→  1038→
+    40→  1039→                {/* library — one row per experience record */}
+    41→  1040→                <div className="max-h-72 overflow-y-auto space-y-1" data-testid="knowledge-list">
+    42→  1041→                  {knowledgeRecords.length === 0 ? (
+    43→  1042→                    <p className="text-center text-vs-dim text-[10.5px] py-6" data-testid="knowledge-empty">
+    44→  1043→                      {knowledgeSearch || knowledgeScope !== 'all' || knowledgeStatusFilter !== 'all' || knowledgeCategory
+    45→  1044→                        ? 'no records match the current filters.'
+    46→  1045→                        : 'no knowledge records yet — GLM submits one every time it fixes something non-trivial in your workspace.'}
+    47→  1046→                    </p>
+    48→  1047→                  ) : (
+    49→  1048→                    knowledgeRecords.map((r) => {
+    50→  1049→                      const st = knowledgeStatusMeta(r.status);
+    51→  1050→                      const active = knowledgeSelected === r.id;
+    52→  1051→                      return (
+    53→  1052→                        <button
+    54→  1053→                          key={r.id}
+    55→  1054→                          suppressHydrationWarning
+    56→  1055→                          onClick={() => selectKnowledge(r.id)}
+    57→  1056→                          className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md border text-left ${
+    58→  1057→                            active ? 'bg-vs-active border-vs-blue/40' : 'bg-vs-bg/50 border-vs-border hover:bg-vs-hover'
+    59→  1058→                          }`}
+    60→  1059→                          data-testid="knowledge-row"
+    61→  1060→                          data-knowledge-id={r.id}
+    62→  1061→                          data-knowledge-status={r.status}
+    63→  1062→                        >
+    64→  1063→                          <span className={`size-1.5 rounded-full bg-current flex-none ${st.color}`} title={st.label} />
+    65→  1064→                          <span className="font-mono text-[10px] text-vs-blue-bright flex-none truncate max-w-[7rem]" title={r.id}>{r.id}</span>
+    66→  1065→                          <span className="text-[11px] truncate min-w-0 flex-1" title={r.title}>{r.title}</span>
+    67→  1066→                          <Badge
+    68→  1067→                            variant="outline"
+    69→  1068→                            className={`flex-none text-[8.5px] px-1.5 ${r.scope === 'global' ? 'border-vs-blue/40 text-vs-blue' : 'border-vs-purple/40 text-vs-purple'}`}
+    70→  1069→                            title={r.scope === 'project' && r.projectId ? r.projectId : `scope: ${r.scope}`}
+    71→  1070→                          >
+    72→  1071→                            {r.scope}
+    73→  1072→                          </Badge>
+    74→  1073→                          <span className="text-[9.5px] text-vs-faint flex-none hidden lg:inline" title={`category: ${r.category}`}>{r.category}</span>
+    75→  1074→                          <span className="font-mono text-[9.5px] text-vs-faint flex-none hidden md:inline" title={`${r.versions?.length ?? 0} versions`}>v{r.activeVersion} · {r.versions?.length ?? 0}v</span>
+    76→  1075→                          <span className="font-mono text-[9.5px] flex-none hidden sm:inline" title={`reuse: ${r.reuseStats?.worked ?? 0} worked · ${r.reuseStats?.failed ?? 0} failed`}>
+    77→  1076→                            <span className="text-vs-green">{r.reuseStats?.worked ?? 0}✓</span>{' '}<span className="text-vs-red">{r.reuseStats?.failed ?? 0}✗</span>
+    78→  1077→                          </span>
+    79→  1078→                          <span className="font-mono text-[9.5px] text-vs-faint flex-none hidden xl:inline" title={r.updatedAt}>{shortWhen(r.updatedAt)}</span>
+    80→  1079→                        </button>
+    81→  1080→                      );
+    82→  1081→                    })
+    83→  1082→                  )}
+    84→  1083→                </div>
+    85→  1084→
+    86→  1085→                {/* detail panel — inline, like the skill viewer */}
+    87→  1086→                {selectedKnowledge && (() => {
+    88→  1087→                  const r = selectedKnowledge;
+    89→  1088→                  const st = knowledgeStatusMeta(r.status);
+    90→  1089→                  const av = activeKnowledgeVersion;
+    91→  1090→                  return (
+    92→  1091→                    <div className="rounded-md border border-vs-border overflow-hidden" data-testid="knowledge-detail">
+    93→  1092→                      <div className="flex items-center gap-2 px-2.5 py-1.5 bg-vs-panel-2">
+    94→  1093→                        <Brain className="size-3.5 text-vs-teal flex-none" />
+    95→  1094→                        <span className="font-mono text-[10.5px] text-vs-blue-bright flex-none truncate max-w-[8rem]" title={r.id}>{r.id}</span>
+    96→  1095→                        <span className="text-[10.5px] text-vs-bright truncate min-w-0 flex-1" title={r.title}>{r.title}</span>
+    97→  1096→                        <span className={`text-[9px] uppercase tracking-wide flex-none ${st.color}`}>{st.label}</span>
+    98→  1097→                        <button suppressHydrationWarning className="text-vs-dim hover:text-vs-text flex-none" onClick={() => setKnowledgeSelected(null)} title="Close" data-testid="knowledge-detail-close">
+    99→  1098→                          <X className="size-3.5" />
+   100→  1099→                        </button>
+   101→  1100→                      </div>
+   102→  1101→
+   103→  1102→                      <div className="p-3 space-y-3">
+   104→  1103→                        {r.problemSummary && (
+   105→  1104→                          <p className="text-[10.5px] text-vs-dim leading-relaxed" title={r.problemSummary}>{r.problemSummary}</p>
+   106→  1105→                        )}
+   107→  1106→
+   108→  1107→                        {/* meta */}
+   109→  1108→                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-3 gap-y-1" data-testid="knowledge-meta">
+   110→  1109→                          <KnowledgeMetaItem label="status"><span className={st.color}>{st.label}</span></KnowledgeMetaItem>
+   111→  1110→                          <KnowledgeMetaItem label="scope" title={r.projectId ?? undefined}>{r.scope}</KnowledgeMetaItem>
+   112→  1111→                          <KnowledgeMetaItem label="category">{r.category}</KnowledgeMetaItem>
+   113→  1112→                          <KnowledgeMetaItem label="created" title={r.createdAt}>{shortWhen(r.createdAt)}</KnowledgeMetaItem>
+   114→  1113→                          <KnowledgeMetaItem label="updated" title={r.updatedAt}>{shortWhen(r.updatedAt)}</KnowledgeMetaItem>
+   115→  1114→                          <KnowledgeMetaItem label="created by" title={r.createdBy}>{shortActor(r.createdBy)}</KnowledgeMetaItem>
+   116→  1115→                        </div>
+   117→  1116→
+   118→  1117→                        {/* active version content */}
+   119→  1118→                        {av ? (
+   120→  1119→                          <div className="space-y-2" data-testid="knowledge-active-version">
+   121→  1120→                            <div className="flex items-center gap-1.5">
+   122→  1121→                              <span className="text-[9.5px] uppercase tracking-wide text-vs-dim">active version</span>
+   123→  1122→                              <Badge variant="outline" className="border-vs-blue/40 text-vs-blue text-[9px] font-mono px-1.5">v{av.version}</Badge>
+   124→  1123→                            </div>
+   125→  1124→                            <KnowledgeVersionView v={av} />
+   126→  1125→                          </div>
+   127→  1126→                        ) : (
+   128→  1127→                          <p className="text-[10.5px] text-vs-faint">no versions recorded</p>
+   129→  1128→                        )}
+   130→  1129→
+   131→  1130→                        {/* all versions — collapsed by default */}
+   132→  1131→                        {(r.versions?.length ?? 0) > 0 && (
+   133→  1132→                          <div>
+   134→  1133→                            <button
+   135→  1134→                              suppressHydrationWarning
+   136→  1135→                              className="text-[10px] uppercase tracking-wide text-vs-dim hover:text-vs-text flex items-center gap-1"
+   137→  1136→                              onClick={() => setKnowledgeVersionsOpen((o) => !o)}
+   138→  1137→                              aria-expanded={knowledgeVersionsOpen}
+   139→  1138→                              data-testid="knowledge-versions-toggle"
+   140→  1139→                            >
+   141→  1140→                              {knowledgeVersionsOpen ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+   142→  1141→                              all versions · {r.versions.length}
+   143→  1142→                            </button>
+   144→  1143→                            {knowledgeVersionsOpen && (
+   145→  1144→                              <div className="mt-1.5 space-y-1.5">
+   146→  1145→                                {selectedKnowledgeVersions.map((vv) => {
+   147→  1146→                                  const vf = knowledgeVerifMeta(vv.verificationStatus);
+   148→  1147→                                  const vOpen = knowledgeOpenVersions.has(vv.version);
+   149→  1148→                                  return (
+   150→  1149→                                    <div key={vv.version} className="rounded-md border border-vs-border overflow-hidden">
+   151→  1150→                                      <button
+   152→  1151→                                        suppressHydrationWarning
+   153→  1152→                                        className="w-full flex items-center gap-2 px-2.5 py-1.5 bg-vs-panel-2/50 hover:bg-vs-hover text-left"
+   154→  1153→                                        onClick={() => toggleKnowledgeVersion(vv.version)}
+   155→  1154→                                        aria-expanded={vOpen}
+   156→  1155→                                        data-testid="knowledge-version-header"
+   157→  1156→                                        data-version={vv.version}
+   158→  1157→                                      >
+   159→  1158→                                        {vOpen ? <ChevronDown className="size-3 text-vs-faint flex-none" /> : <ChevronRight className="size-3 text-vs-faint flex-none" />}
+   160→  1159→                                        <span className="font-mono text-[10px] text-vs-bright flex-none">v{vv.version}</span>
+   161→  1160→                                        <span className={`text-[9.5px] flex-none ${vf.cls}`}>{vf.label}</span>
+   162→  1161→                                        <span className="text-[9px] text-vs-faint truncate min-w-0 flex-1" title={vv.createdBy}>{shortActor(vv.createdBy)}</span>
+   163→  1162→                                        {vv.supersedes !== undefined && <span className="text-[9px] text-vs-faint flex-none hidden sm:inline">supersedes v{vv.supersedes}</span>}
+   164→  1163→                                        <span className="font-mono text-[9px] text-vs-faint flex-none hidden md:inline">{shortWhen(vv.createdAt)}</span>
+   165→  1164→                                      </button>
+   166→  1165→                                      {vOpen && (
+   167→  1166→                                        <div className="p-2.5 bg-vs-bg/60">
+   168→  1167→                                          <KnowledgeVersionView v={vv} />
+   169→  1168→                                        </div>
+   170→  1169→                                      )}
+   171→  1170→                                    </div>
+   172→  1171→                                  );
+   173→  1172→                                })}
+   174→  1173→                              </div>
+   175→  1174→                            )}
+   176→  1175→                          </div>
+   177→  1176→                        )}
+   178→  1177→
+   179→  1178→                        {/* scientific verification — evidence-driven runs (GLM designs, the bridge executes & decides) */}
+   180→  1179→                        <VerificationSection
+   181→  1180→                          runs={recordRuns}
+   182→  1181→                          selectedId={vRunId}
+   183→  1182→                          onSelect={selectVRun}
+   184→  1183→                        />
+   185→  1184→                        {vRun && vRun.run?.knowledgeId === selectedKnowledge?.id && (
+   186→  1185→                          <VerificationRunPanel
+   187→  1186→                            detail={vRun}
+   188→  1187→                            busy={vBusy}
+   189→  1188→                            error={vError}
+   190→  1189→                            confirm={vConfirm}
+   191→  1190→                            onStart={(runId, dangerous) => runVAction('start', runId, dangerous)}
+   192→  1191→                            onCancel={(runId) => runVAction('cancel', runId)}
+   193→  1192→                            onFeedback={sendVFeedback}
+   194→  1193→                            onOpenFile={readFile}
+   195→  1194→                          />
+   196→  1195→                        )}
+   197→  1196→
+   198→  1197→                        {/* reuse feedback */}
+   199→  1198→                        <div data-testid="knowledge-feedback">
+   200→  1199→                          <div className="text-[9.5px] uppercase tracking-wide text-vs-dim mb-1">reuse feedback · {selectedKnowledgeFeedback.length}</div>
+   201→  1200→                          {selectedKnowledgeFeedback.length === 0 ? (
+   202→  1201→                            <p className="text-[10px] text-vs-faint">no reuse feedback yet</p>
+   203→  1202→                          ) : (
+   204→  1203→                            <div className="space-y-1 max-h-36 overflow-y-auto">
+   205→  1204→                              {selectedKnowledgeFeedback.map((f) => {
+   206→  1205→                                const om = f.outcome === 'worked'
+   207→  1206→                                  ? { c: 'text-vs-green', g: '✓' }
+   208→  1207→                                  : f.outcome === 'failed'
+   209→  1208→                                    ? { c: 'text-vs-red', g: '✗' }
+   210→  1209→                                    : { c: 'text-vs-yellow', g: '⚠' };
+   211→  1210→                                return (
+   212→  1211→                                  <div key={f.id} className="flex items-start gap-1.5 min-w-0" data-testid="knowledge-feedback-row">
+   213→  1212→                                    <span className={`font-mono text-[10px] flex-none ${om.c}`}>{om.g}</span>
+   214→  1213→                                    <span className="text-[10px] text-vs-dim truncate min-w-0 flex-1" title={f.notes}>{f.notes}</span>
+   215→  1214→                                    <span className="font-mono text-[9px] text-vs-faint flex-none whitespace-nowrap">v{f.experienceVersion} · {shortWhen(f.createdAt)}</span>
+   216→  1215→                                  </div>
+   217→  1216→                                );
+   218→  1217→                              })}
+   219→  1218→                            </div>
+   220→  1219→                          )}
+   221→  1220→                        </div>
+   222→  1221→
+   223→  1222→                        {/* honest ack error from the last action */}
+   224→  1223→                        {knowledgeActionError && (
+   225→  1224→                          <p className="text-vs-red text-[10.5px] text-right break-words" data-testid="knowledge-action-error">{knowledgeActionError}</p>
+   226→  1225→                        )}
+   227→  1226→
+   228→  1227→                        {/* actions — destructive ones need a confirming second click */}
+   229→  1228→                        <div className="flex items-center justify-end gap-2 flex-wrap pt-1 border-t border-vs-border/60" data-testid="knowledge-actions">
+   230→  1229→                          {(r.status === 'candidate' || r.status === 'verification_pending') && (
+   231→  1230→                            <Button
+   232→  1231→                              size="sm"
+   233→  1232→                              className="h-7 gap-1"
+   234→  1233→                              onClick={() => runKnowledgeAction('approve', { id: r.id, version: r.activeVersion })}
+   235→  1234→                              title="Promote to verified (owner approval)"
+   236→  1235→                              data-testid="knowledge-approve"
+   237→  1236→                            >
+   238→  1237→                              <CheckCircle2 className="size-3.5" /> Approve
+   239→  1238→                            </Button>
+   240→  1239→                          )}
+   241→  1240→                          {r.status !== 'rejected' && (
+   242→  1241→                            <Button
+   243→  1242→                              size="sm"
+   244→  1243→                              variant="outline"
+   245→  1244→                              className={`h-7 gap-1 border-vs-border-2 ${knowledgeConfirm === 'reject' ? 'border-vs-yellow/60 text-vs-yellow' : 'text-vs-dim'}`}
+   246→  1245→                              onClick={() => runKnowledgeAction('reject', { id: r.id }, true)}
+   247→  1246→                              data-testid="knowledge-reject"
+   248→  1247→                              title="Reject this record"
+   249→  1248→                            >
+   250→  1249→                              {knowledgeConfirm === 'reject' ? 'confirm?' : <><XCircle className="size-3.5" /> Reject</>}
+   251→  1250→                            </Button>
+   252→  1251→                          )}
+   253→  1252→                          {r.status === 'verified' && (
+   254→  1253→                            <Button
+   255→  1254→                              size="sm"
+   256→  1255→                              variant="outline"
+   257→  1256→                              className={`h-7 gap-1 border-vs-border-2 ${knowledgeConfirm === 'deprecate' ? 'border-vs-yellow/60 text-vs-yellow' : 'text-vs-dim'}`}
+   258→  1257→                              onClick={() => runKnowledgeAction('deprecate', { id: r.id }, true)}
+   259→  1258→                              data-testid="knowledge-deprecate"
+   260→  1259→                              title="Mark as superseded/outdated"
+   261→  1260→                            >
+   262→  1261→                              {knowledgeConfirm === 'deprecate' ? 'confirm?' : <><History className="size-3.5" /> Deprecate</>}
+   263→  1262→                            </Button>
+   264→  1263→                          )}
+   265→  1264→                          <Button
+   266→  1265→                            size="sm"
+   267→  1266→                            variant="outline"
+   268→  1267→                            className={`h-7 gap-1 border-vs-border-2 ${knowledgeConfirm === 'archive' ? 'border-vs-yellow/60 text-vs-yellow' : 'text-vs-dim'}`}
+   269→  1268→                            onClick={() => runKnowledgeAction('archive', { id: r.id }, true)}
+   270→  1269→                            data-testid="knowledge-archive"
+   271→  1270→                            title="Archive this record"
+   272→  1271→                          >
+   273→  1272→                            {knowledgeConfirm === 'archive' ? 'confirm?' : <><Archive className="size-3.5" /> Archive</>}
+   274→  1273→                          </Button>
+   275→  1274→                          {(r.status === 'deprecated' || r.status === 'archived' || r.status === 'rejected') && (
+   276→  1275→                            <Button
+   277→  1276→                              size="sm"
+   278→  1277→                              variant="outline"
+   279→  1278→                              className="h-7 gap-1 border-vs-border-2 text-vs-dim"
+   280→  1279→                              onClick={() => runKnowledgeAction('restore', { id: r.id })}
+   281→  1280→                              data-testid="knowledge-restore"
+   282→  1281→                              title="Restore to candidate"
+   283→  1282→                            >
+   284→  1283→                              <Undo2 className="size-3.5" /> Restore
+   285→  1284→                            </Button>
+   286→  1285→                          )}
+   287→  1286→                          <Button
+   288→  1287→                            size="sm"
+   289→  1288→                            variant="outline"
+   290→  1289→                            className={`h-7 gap-1 ${knowledgeConfirm === 'delete' ? 'border-vs-red text-vs-red' : 'border-vs-red/40 text-vs-red'}`}
+   291→  1290→                            onClick={() => runKnowledgeAction('delete', { id: r.id }, true)}
+   292→  1291→                            data-testid="knowledge-delete"
+   293→  1292→                            title="Soft-delete this record"
+   294→  1293→                          >
+   295→  1294→                            {knowledgeConfirm === 'delete' ? 'confirm?' : <><Trash2 className="size-3.5" /> Delete</>}
+   296→  1295→                          </Button>
+   297→  1296→                        </div>
+   298→  1297→                      </div>
+   299→  1298→                    </div>
+   300→  1299→                  );
+   301→  1300→                })()}
+   302→  1301→
+   303→  1302→                {/* failed attempts — collapsed by default */}
+   304→  1303→                <div data-testid="knowledge-attempts-section">
+   305→  1304→                  <button
+   306→  1305→                    suppressHydrationWarning
+   307→  1306→                    className="text-[10px] uppercase tracking-wide text-vs-dim hover:text-vs-text flex items-center gap-1.5"
+   308→  1307→                    onClick={() => setKnowledgeAttemptsOpen((o) => !o)}
+   309→  1308→                    aria-expanded={knowledgeAttemptsOpen}
+   310→  1309→                    data-testid="knowledge-attempts-toggle"
+   311→  1310→                  >
+   312→  1311→                    {knowledgeAttemptsOpen ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+   313→  1312→                    failed attempts
+   314→  1313→                    <Badge variant="outline" className="border-vs-border-2 text-vs-dim text-[9px] font-mono" data-testid="knowledge-attempts-count">
+   315→  1314→                      {knowledgeCounts?.attempts ?? 0}
+   316→  1315→                    </Badge>
+   317→  1316→                  </button>
+   318→  1317→                  {knowledgeAttemptsOpen && (
+   319→  1318→                    (knowledge.attempts ?? []).length === 0 ? (
+   320→  1319→                      <p className="text-[10.5px] text-vs-faint pl-4 pt-1.5" data-testid="knowledge-attempts-empty">no failed attempts recorded</p>
+   321→  1320→                    ) : (
+   322→  1321→                      <div className="mt-1.5 max-h-48 overflow-y-auto rounded-md border border-vs-border" data-testid="knowledge-attempts-list">
+   323→  1322→                        {(knowledge.attempts ?? []).map((a) => (
+   324→  1323→                          <div key={a.id} className="flex items-center gap-2 px-2.5 py-1.5 border-b border-vs-border/60 last:border-b-0 hover:bg-vs-hover/50" data-testid="knowledge-attempt-row">
+   325→  1324→                            <span className="flex-none" title={a.result}><XCircle className="size-3 text-vs-red" /></span>
+   326→  1325→                            <span className="font-mono text-[9.5px] text-vs-blue-bright flex-none truncate max-w-[7rem]" title={a.id}>{a.id}</span>
+   327→  1326→                            <span className="text-[10px] truncate min-w-0 flex-1" title={a.problemSummary}>{a.problemSummary}</span>
+   328→  1327→                            <span className="text-[9.5px] text-vs-dim truncate max-w-[14rem] hidden md:inline" title={a.failureReason}>{a.failureReason}</span>
+   329→  1328→                            <span className="font-mono text-[9px] text-vs-faint flex-none hidden sm:inline">{shortWhen(a.createdAt)}</span>
+   330→  1329→                          </div>
+   331→  1330→                        ))}
+   332→  1331→                      </div>
+   333→  1332→                    )
+   334→  1333→                  )}
+   335→  1334→                </div>
+   336→  1335→
+   337→  1336→                {/* audit log — collapsed by default */}
+   338→  1337→                <div data-testid="knowledge-audit-section">
+   339→  1338→                  <button
+   340→  1339→                    suppressHydrationWarning
+   341→  1340→                    className="text-[10px] uppercase tracking-wide text-vs-dim hover:text-vs-text flex items-center gap-1.5"
+   342→  1341→                    onClick={() => setKnowledgeAuditOpen((o) => !o)}
+   343→  1342→                    aria-expanded={knowledgeAuditOpen}
+   344→  1343→                    data-testid="knowledge-audit-toggle"
+   345→  1344→                  >
+   346→  1345→                    {knowledgeAuditOpen ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+   347→  1346→                    audit log
+   348→  1347→                    <Badge variant="outline" className="border-vs-border-2 text-vs-dim text-[9px] font-mono" data-testid="knowledge-audit-count">
+   349→  1348→                      {knowledgeCounts?.audit ?? 0}
+   350→  1349→                    </Badge>
+   351→  1350→                  </button>
+   352→  1351→                  {knowledgeAuditOpen && (
+   353→  1352→                    (knowledge.audit ?? []).length === 0 ? (
+   354→  1353→                      <p className="text-[10.5px] text-vs-faint pl-4 pt-1.5" data-testid="knowledge-audit-empty">no audit events yet</p>
+   355→  1354→                    ) : (
+   356→  1355→                      <div className="mt-1.5 max-h-48 overflow-y-auto rounded-md border border-vs-border" data-testid="knowledge-audit-list">
+   357→  1356→                        {(knowledge.audit ?? []).map((a) => (
+   358→  1357→                          <div key={a.id} className="flex items-center gap-2 px-2.5 py-1 border-b border-vs-border/60 last:border-b-0 hover:bg-vs-hover/50" data-testid="knowledge-audit-row">
+   359→  1358→                            <span className="font-mono text-[9px] text-vs-faint flex-none" title={new Date(a.ts).toLocaleString()}>{shortWhen(a.ts)}</span>
+   360→  1359→                            <span className="text-[9px] text-vs-dim flex-none hidden sm:inline">{shortActor(a.actor)}</span>
+   361→  1360→                            <span className="font-mono text-[9.5px] text-vs-teal flex-none">{a.operation}</span>
+   362→  1361→                            <span className="font-mono text-[9.5px] text-vs-blue-bright flex-none truncate max-w-[7rem]" title={a.entityId}>{a.entityId}</span>
+   363→  1362→                            <span className="font-mono text-[9.5px] text-vs-dim flex-none whitespace-nowrap">
+   364→  1363→                              {a.oldVersion === null && a.newVersion === null
+   365→  1364→                                ? '—'
+   366→  1365→                                : `${a.oldVersion !== null ? `v${a.oldVersion}` : ''}→${a.newVersion !== null ? `v${a.newVersion}` : ''}`}
+   367→  1366→                            </span>
+   368→  1367→                            <span className="text-[9.5px] text-vs-dim truncate min-w-0 flex-1" title={a.reason}>{a.reason}</span>
+   369→  1368→                          </div>
+   370→  1369→                        ))}
+   371→  1370→                      </div>
+   372→  1371→                    )
+   373→  1372→                  )}
+   374→  1373→                </div>
+   375→  1374→              </div>
+   376→  1375→            )}
+   377→  1376→          </CardContent>
+   378→  1377→        </Card>
+   379→  1378→
+   380→  1379→        {/* Main grid */}
+   381→  1380→        <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
+   382→  1381→          {/* LEFT — Workspace */}
+   383→  1382→          <div className="xl:col-span-7 space-y-4 min-w-0">
+   384→  1383→            <Card className="bg-vs-panel border-vs-border flex flex-col">
+   385→  1384→              <CardHeader className="pb-2 pt-4 px-4 flex-row items-center gap-2 flex-wrap">
+   386→  1385→                <CardTitle className="text-xs font-semibold uppercase tracking-wide text-vs-text flex items-center gap-1.5">
+   387→  1386→                  <FolderTreeIcon /> Workspace
+   388→  1387→                </CardTitle>
+   389→  1388→                <Badge variant="outline" className="border-vs-border-2 text-vs-dim font-mono text-[10px]">
+   390→  1389→                  {tree?.name ?? status.workspaceName ?? '—'}
+   391→  1390→                </Badge>
+   392→  1391→                {tree?.stats?.truncated && (
+   393→  1392→                  <Badge variant="outline" className="border-vs-yellow/40 text-vs-yellow text-[10px]">truncated view</Badge>
+   394→  1393→                )}
+   395→  1394→                <div className="flex-1" />
+   396→  1395→                <div className="flex items-center gap-2">
+   397→  1396→                  <div className="relative">
+   398→  1397→                    <Search className="size-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-vs-dim" />
+   399→  1398→                    <Input
+   400→  1399→                      value={filter}
+   401→  1400→                      onChange={(e) => setFilter(e.target.value)}
+   402→  1401→                      placeholder="filter files…"
+   403→  1402→                      className="h-8 text-xs pl-7 w-40 sm:w-52"
+   404→  1403→                    />
+   405→  1404→                  </div>
+   406→  1405→                  <Button onClick={refreshTree} disabled={!paired || treeLoading} variant="outline" size="sm" className="border-vs-border-2 h-8" title="Rescan workspace">
+   407→  1406→                    {treeLoading ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+   408→  1407→                  </Button>
+   409→  1408→                </div>
+   410→  1409→              </CardHeader>
+   411→  1410→              <CardContent className="px-2 pb-4 pt-1">
+   412→  1411→                {!paired ? (
+   413→  1412→                  <LockedPanel text="Pair this browser to explore every file in your VS Code workspace." />
+   414→  1413→                ) : !wsOnline ? (
+   415→  1414→                  <LockedPanel text="Workspace offline — open VS Code with the AI Code Agent extension connected." icon={<WifiOff className="size-8" />} />
+   416→  1415→                ) : !tree?.tree ? (
+   417→  1416→                  <div className="text-center py-14 text-vs-dim text-xs">
+   418→  1417→                    {treeLoading ? <Loader2 className="size-6 animate-spin mx-auto mb-3" /> : <FolderTreeIcon />}
+   419→  1418→                    <p className="max-w-sm mx-auto leading-relaxed">
+   420→  1419→                      {treeLoading
+   421→  1420→                        ? 'Scanning the workspace…'
+   422→  1421→                        : 'No workspace scan yet. Press the refresh button, or make sure the AI Code Agent extension v0.4.0+ is installed in VS Code.'}
+   423→  1422→                    </p>
+   424→  1423→                  </div>
+   425→  1424→                ) : (
+   426→  1425→                  <>
+   427→  1426→                    <div className="max-h-[420px] overflow-y-auto text-xs font-mono" data-testid="file-explorer">
+   428→  1427→                      {rows.length === 0 && (
+   429→  1428→                        <p className="text-center text-vs-dim py-8">
+   430→  1429→                          {filter ? `No files match “${filter}”.` : 'Empty workspace.'}
+   431→  1430→                        </p>
+   432→  1431→                      )}
+   433→  1432→                      {rows.map(({ node, depth }) => (
+   434→  1433→                        <FileRow
+   435→  1434→                          key={node.path}
+   436→  1435→                          node={node}
+   437→  1436→                          depth={depth}
+   438→  1437→                          expanded={node.type === 'dir' && expanded.has(node.path)}
+   439→  1438→                          onToggle={() => toggleDir(node.path)}
+   440→  1439→                          onOpen={() => readFile(node.path)}
+   441→  1440→                          active={fileView?.path === node.path}
+   442→  1441→                          highlight={!!filter.trim()}
+   443→  1442→                        />
+   444→  1443→                      ))}
+   445→  1444→                      {filter && totalFlatHits > 300 && !showAllFlat && (
+   446→  1445→                        <button suppressHydrationWarning className="w-full text-center py-2 text-[11px] text-vs-blue-bright hover:underline" onClick={() => setShowAllFlat(true)}>
+   447→  1446→                          show {Math.min(totalFlatHits, 1000) - 300} more of {totalFlatHits} matches…
+   448→  1447→                        </button>
+   449→  1448→                      )}
+   450→  1449→                    </div>
+   451→  1450→                    <Separator className="bg-vs-border my-2" />
+   452→  1451→                    <div className="flex items-center gap-3 text-[10.5px] text-vs-dim flex-wrap">
+   453→  1452→                      <span>{tree.stats?.files?.toLocaleString()} files · {tree.stats?.dirs?.toLocaleString()} folders</span>
+   454→  1453→                      {tree.stats?.totalBytes ? <span>· {fmtBytes(tree.stats.totalBytes)} of source</span> : null}
+   455→  1454→                      {tree.stats?.scannedAt ? <span>· scanned {new Date(tree.stats.scannedAt).toLocaleTimeString()}</span> : null}
+   456→  1455→                      <span className="flex-1" />
+   457→  1456→                      <button suppressHydrationWarning className="flex items-center gap-1 hover:text-vs-text" onClick={() => setExpanded(new Set(['']))}>
+   458→  1457→                        collapse all
+   459→  1458→                      </button>
+   460→  1459→                    </div>
+   461→  1460→                  </>
+   462→  1461→                )}
+   463→  1462→              </CardContent>
+   464→  1463→            </Card>
+   465→  1464→
+   466→  1465→            {/* File viewer */}
+   467→  1466→            {fileView && (
+   468→  1467→              <Card className="bg-vs-panel border-vs-border">
+   469→  1468→                <CardHeader className="pb-2 pt-4 px-4 flex-row items-center gap-2">
+   470→  1469→                  <FileCode className="size-3.5 text-vs-dim" />
+   471→  1470→                  <CardTitle className="text-xs font-mono text-vs-bright truncate flex-1 min-w-0" title={fileView.path}>
+   472→  1471→                    {fileView.path}
+   473→  1472→                  </CardTitle>
+   474→  1473→                  {fileView.meta?.bytes !== undefined && (
+   475→  1474→                    <Badge variant="outline" className="border-vs-border-2 text-vs-dim text-[10px] font-mono">
+   476→  1475→                      {fmtBytes(fileView.meta.bytes)}{fileView.meta?.lines ? ` · ${fileView.meta.lines} lines` : ''}
+   477→  1476→                    </Badge>
+   478→  1477→                  )}
+   479→  1478→                  <Button
+   480→  1479→                    variant="ghost" size="sm" className="h-6 px-2 text-vs-dim"
+   481→  1480→                    onClick={() => navigator.clipboard.writeText(fileView.content ?? '').catch(() => undefined)}
+   482→  1481→                    title="Copy content"
+   483→  1482→                  >
+   484→  1483→                    <Copy className="size-3.5" />
+   485→  1484→                  </Button>
+   486→  1485→                  <Button variant="ghost" size="sm" className="h-6 px-2 text-vs-dim" onClick={() => setFileView(null)} title="Close">
+   487→  1486→                    <X className="size-3.5" />
+   488→  1487→                  </Button>
+   489→  1488→                </CardHeader>
+   490→  1489→                <CardContent className="px-4 pb-4 pt-0">
+   491→  1490→                  {fileView.loading ? (
+   492→  1491→                    <div className="py-10 text-center text-vs-dim text-xs flex flex-col items-center gap-2">
+   493→  1492→                      <Loader2 className="size-5 animate-spin" /> reading {fileView.path}…
+   494→  1493→                    </div>
+   495→  1494→                  ) : fileView.error ? (
+   496→  1495→                    <div className="py-6 text-center text-vs-red text-xs">{fileView.error}</div>
+   497→  1496→                  ) : (
+   498→  1497→                    <pre className="text-[10.5px] font-mono text-vs-text whitespace-pre-wrap break-all bg-vs-bg border border-vs-border rounded-md p-3 max-h-[460px] overflow-auto" data-testid="file-content">
+   499→  1498→                      {(fileView.content ?? '').slice(0, 300000) || '(empty file)'}
+   500→  1499→                    </pre>
+   501→  1500→                  )}
+   502→  1501→                </CardContent>
+   503→  1502→              </Card>
+   504→  1503→            )}
+   505→  1504→
+   506→  1505→            {/* Connect guide */}
+   507→  1506→            <Card className="bg-vs-panel border-vs-border">
+   508→  1507→              <CardContent className="px-4 py-4">
+   509→  1508→                <div className="text-[10px] uppercase tracking-wide text-vs-dim mb-2 flex items-center gap-1.5">
+   510→  1509→                  <User className="size-3" /> how this works
+   511→  1510→                </div>
+   512→  1511→                <ol className="text-[11px] text-vs-dim space-y-1.5 list-decimal list-inside leading-relaxed">
+   513→  1512→                  <li>Install the <span className="text-vs-bright">AI Code Agent</span> extension (v0.5.0+) in VS Code — the VSIX lives on this dashboard: <a href="/ai-code-agent-0.5.0.vsix" className="font-mono text-vs-blue-bright underline">/ai-code-agent-0.5.0.vsix</a>.</li>
+   514→  1513→                  <li>Settings → <span className="font-mono text-vs-text">aiCodeAgent.serverUrl</span> → paste this page&apos;s URL, then Command palette → <span className="font-mono text-vs-text">AI Code Agent: Connect</span> (migrating machines? <span className="font-mono text-vs-text">AI Code Agent: Set Workspace Identity…</span> first).</li>
+   515→  1514→                  <li>Enter the pairing code from the extension panel above — once.</li>
+   516→  1515→                  <li>Chat with GLM at <span className="text-vs-blue-bright">z.ai</span> and ask it to work on your code.</li>
+   517→  1516→                  <li>Every read, write, edit, delete and command appears in the feed → with diffs you can read.</li>
+   518→  1517→                  <li>Drop skill documents into a <span className="font-mono text-vs-purple">.skills/</span> folder in your workspace — GLM finds them, reads them and follows them <span className="text-vs-text">before</span> starting a task. Say <span className="font-mono text-vs-text">{'“use the skill <name>”'}</span> in your z.ai chat to apply one.</li>
+   519→  1518→                </ol>
+   520→  1519→              </CardContent>
+   521→  1520→            </Card>
+   522→  1521→          </div>
+   523→  1522→
+   524→  1523→          {/* RIGHT — Skills + AI Activity */}
+   525→  1524→          <div className="xl:col-span-5 space-y-4 min-w-0">
+   526→  1525→            {/* Skills — teach the AI before it starts thinking */}
+   527→  1526→            <Card className="bg-vs-panel border-vs-border" data-testid="skills-card">
+   528→  1527→              <CardHeader className="pb-2 pt-4 px-4 flex-row items-center gap-2 flex-wrap">
+   529→  1528→                <CardTitle className="text-xs font-semibold uppercase tracking-wide text-vs-text flex items-center gap-1.5">
+   530→  1529→                  <GraduationCap className="size-3.5 text-vs-purple" /> Skills
+   531→  1530→                </CardTitle>
+   532→  1531→                <Badge variant="outline" className="border-vs-border-2 text-vs-dim font-mono text-[10px]">
+   533→  1532→                  {skills.length} in .skills/
+   534→  1533→                </Badge>
+   535→  1534→                <div className="flex-1" />
+   536→  1535→                <button
+   537→  1536→                  suppressHydrationWarning
+   538→  1537→                  className="text-[10px] text-vs-dim hover:text-vs-text flex items-center gap-1 disabled:opacity-50"
+   539→  1538→                  onClick={refreshSkills}
+   540→  1539→                  disabled={!paired || skillsRefreshing}
+   541→  1540→                  title="Re-check the workspace .skills/ folder now"
+   542→  1541→                  data-testid="skill-refresh"
+   543→  1542→                >
+   544→  1543→                  {skillsRefreshing ? <Loader2 className="size-3 animate-spin" /> : <RefreshCw className="size-3" />}
+   545→  1544→                  re-check
+   546→  1545→                </button>
+   547→  1546→              </CardHeader>
+   548→  1547→              <CardContent className="px-4 pb-4 pt-1 space-y-3">
+   549→  1548→                <p className="text-[11px] text-vs-dim leading-relaxed" data-testid="skill-explainer">
+   550→  1549→                  Skills live in <span className="text-vs-text">your workspace</span> — create a{' '}
+   551→  1550→                  <span className="font-mono text-vs-purple">.skills/</span> folder and drop skill documents in
+   552→  1551→                  (loose files, or a sub-folder per skill with a <span className="font-mono">SKILL.md</span>).
+   553→  1552→                  GLM re-reads them <span className="text-vs-text">before every task</span> — say{' '}
+   554→  1553→                  <span className="font-mono text-vs-text">{'“use the skill <name>”'}</span> in your z.ai chat to apply one.
+   555→  1554→                </p>
+   556→  1555→
+   557→  1556→                {!wsOnline && (
+   558→  1557→                  <p className="text-[10.5px] text-vs-yellow flex items-center gap-1.5" data-testid="skill-offline">
+   559→  1558→                    <AlertTriangle className="size-3 flex-none" /> workspace offline — .skills/ is checked when VS Code reconnects.
+   560→  1559→                  </p>
+   561→  1560→                )}
+   562→  1561→                {wsOnline && skills.length === 0 && skillsMeta.note && (
+   563→  1562→                  <p className="text-[10.5px] text-vs-dim flex items-start gap-1.5" data-testid="skill-note">
+   564→  1563→                    <AlertTriangle className="size-3 flex-none mt-0.5 text-vs-yellow" /> {skillsMeta.note}
+   565→  1564→                  </p>
+   566→  1565→                )}
+   567→  1566→
+   568→  1567→                {/* list */}
+   569→  1568→                {skills.length === 0 ? (
+   570→  1569→                  <p className="text-center text-vs-dim text-[10.5px] py-2" data-testid="skill-empty">
+   571→  1570→                    no skills in .skills/ yet — create the folder in your workspace and drop skill documents in
+   572→  1571→                  </p>
+   573→  1572→                ) : (
+   574→  1573→                  <div className="max-h-56 overflow-y-auto space-y-1" data-testid="skill-list">
+   575→  1574→                    {skills.map((s) => (
+   576→  1575→                      <SkillRow
+   577→  1576→                        key={s.name}
+   578→  1577→                        s={s}
+   579→  1578→                        active={skillView?.name === s.name}
+   580→  1579→                        onOpen={() => openSkill(s.name)}
+   581→  1580→                      />
+   582→  1581→                    ))}
+   583→  1582→                  </div>
+   584→  1583→                )}
+   585→  1584→
+   586→  1585→                {/* skill viewer */}
+   587→  1586→                {skillView && (
+   588→  1587→                  <div className="rounded-md border border-vs-border overflow-hidden" data-testid="skill-viewer">
+   589→  1588→                    <div className="flex items-center gap-2 px-2.5 py-1.5 bg-vs-panel-2">
+   590→  1589→                      <BookOpen className="size-3.5 text-vs-purple flex-none" />
+   591→  1590→                      <span className="font-mono text-[11px] text-vs-bright truncate flex-1 min-w-0" title={skillView.name}>
+   592→  1591→                        {skillView.name}
+   593→  1592→                      </span>
+   594→  1593→                      {skillView.skill?.format === 'package' && (
+   595→  1594→                        <Badge variant="outline" className="border-vs-blue/40 text-vs-blue text-[8.5px] px-1.5 flex-none" data-testid="skill-package-badge">
+   596→  1595→                          folder · {skillView.skill.files?.length ?? 0} files
+   597→  1596→                        </Badge>
+   598→  1597→                      )}
+   599→  1598→                      <span className="text-[9px] text-vs-faint flex-none">
+   600→  1599→                        from .skills/
+   601→
+   602→[showing lines 1000-1599 of 2579; use offset=1600 with limit to continue reading]

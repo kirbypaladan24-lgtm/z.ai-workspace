@@ -404,6 +404,13 @@ const CASE_CATEGORIES: readonly string[] = [
 ];
 const MAX_SYNC_READ_CHARS = 1_400_000;
 const MAX_ATTEMPT_OUTPUT_CHARS = 20_000;
+/** Test-case commands are REFUSED beyond this length — never silently
+ *  truncated. A truncated command changes semantics and executes as garbage
+ *  (observed in VRUN-000003 round 1: five cases were mangled by the old
+ *  truncate() and failed with SyntaxErrors). Long experiment scripts belong
+ *  in the run sandbox dir (knowledge/verification/sandbox/<runId>/), staged
+ *  via the journaled write_file tool and invoked by path. */
+const MAX_CASE_COMMAND_CHARS = 2_000;
 const DEFAULT_TEST_TIMEOUT_MS = 60_000;
 const MAX_TEST_TIMEOUT_MS = 150_000;
 const DEFAULT_RUN_BUDGET_MS = 15 * 60_000;
@@ -680,18 +687,24 @@ async function persistDirty(): Promise<{ ok: boolean; error?: string }> {
   if (!deps) {
     return { ok: false, error: 'module not initialized' };
   }
-  const writes: Array<Promise<boolean>> = [];
-  if (dirty.runs) writes.push(wsWriteFile(FILES.runs, toJsonl(store.runs)));
-  if (dirty.cases) writes.push(wsWriteFile(FILES.cases, toJsonl(store.cases)));
-  if (dirty.attempts) writes.push(wsWriteFile(FILES.attempts, toJsonl(store.attempts)));
-  if (dirty.metrics) writes.push(wsWriteFile(FILES.metrics, toJsonl(store.metrics)));
-  if (dirty.evidence) writes.push(wsWriteFile(FILES.evidence, toJsonl(store.evidence)));
-  if (dirty.meta) writes.push(wsWriteFile(FILES.meta, JSON.stringify(store.meta, null, 2)));
-  const results = await Promise.all(writes);
-  dirty.runs = dirty.cases = dirty.attempts = dirty.metrics = dirty.evidence = dirty.meta = false;
+  const writes: Array<{ flag: 'runs' | 'cases' | 'attempts' | 'metrics' | 'evidence' | 'meta'; p: Promise<boolean> }> = [];
+  if (dirty.runs) writes.push({ flag: 'runs', p: wsWriteFile(FILES.runs, toJsonl(store.runs)) });
+  if (dirty.cases) writes.push({ flag: 'cases', p: wsWriteFile(FILES.cases, toJsonl(store.cases)) });
+  if (dirty.attempts) writes.push({ flag: 'attempts', p: wsWriteFile(FILES.attempts, toJsonl(store.attempts)) });
+  if (dirty.metrics) writes.push({ flag: 'metrics', p: wsWriteFile(FILES.metrics, toJsonl(store.metrics)) });
+  if (dirty.evidence) writes.push({ flag: 'evidence', p: wsWriteFile(FILES.evidence, toJsonl(store.evidence)) });
+  if (dirty.meta) writes.push({ flag: 'meta', p: wsWriteFile(FILES.meta, JSON.stringify(store.meta, null, 2)) });
+  const results = await Promise.all(writes.map((w) => w.p));
+  /* Clear a dirty flag ONLY when its write succeeded (AUD-000036 incident
+   * class: a failed flush must stay dirty and be retried, not forgotten). */
+  let anyFailed = false;
+  for (let i = 0; i < writes.length; i++) {
+    if (results[i]) dirty[writes[i].flag] = false;
+    else anyFailed = true;
+  }
   persistLocalCache();
-  if (results.some((ok) => !ok)) {
-    return { ok: false, error: 'writing the verification store to the workspace failed — retry the operation' };
+  if (anyFailed) {
+    return { ok: false, error: 'writing the verification store to the workspace failed — the failed file(s) stay dirty and will be retried on the next write' };
   }
   return { ok: true };
 }
@@ -976,6 +989,12 @@ function normalizeCase(
   const command = String(input?.command ?? '').trim();
   if (!name) return { ok: false, error: 'every test case needs a name' };
   if (!command) return { ok: false, error: `test case "${name}" needs a command` };
+  if (command.length > MAX_CASE_COMMAND_CHARS) {
+    return {
+      ok: false,
+      error: `test case "${name}" command is ${command.length} chars (limit ${MAX_CASE_COMMAND_CHARS}) — refusing rather than silently truncating: stage long scripts in the run sandbox (knowledge/verification/sandbox/<runId>/) and invoke them by path`,
+    };
+  }
   if (COMMAND_BLOCK_PATTERNS.some((re) => re.test(command))) {
     return { ok: false, error: `test case "${name}" was refused: its command matches a forbidden pattern (filesystem-destructive / power / remote-exec)` };
   }
@@ -992,7 +1011,7 @@ function normalizeCase(
       name: truncate(name, 200),
       objective: truncate(input?.objective ?? '', 1000),
       category,
-      command: truncate(command, 2000),
+      command,
       timeoutMs,
       expected: {
         expectedResult: truncate(input?.expected?.expectedResult ?? '', 1000),
@@ -1598,7 +1617,11 @@ async function addRegression(
           refused.push(`update ${tc.id}: refused command revision`);
           continue;
         }
-        tc.command = truncate(cmd, 2000);
+        if (cmd.length > MAX_CASE_COMMAND_CHARS) {
+          refused.push(`update ${tc.id}: command revision is ${cmd.length} chars (limit ${MAX_CASE_COMMAND_CHARS}) — refused rather than silently truncated`);
+          continue;
+        }
+        tc.command = cmd;
       }
       if (u.criteria) {
         const c = u.criteria;

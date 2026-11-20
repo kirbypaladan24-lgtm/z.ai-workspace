@@ -38,7 +38,8 @@
   --color-card-foreground: var(--card-foreground);
   --color-card: var(--card);
 
-  /* VS Code "Dark+" inspired observatory palette */
+  /* "Obsidian & Emerald" — premium observatory palette.
+     Layered graphite surfaces, one jewel accent, mint highlights. */
   --color-vs-bg: var(--vs-bg);
   --color-vs-panel: var(--vs-panel);
   --color-vs-panel-2: var(--vs-panel-2);
@@ -66,140 +67,149 @@
   --color-vs-comment: var(--vs-comment);
   --color-vs-folder: var(--vs-folder);
 
-  /* Crisp IDE corners */
-  --radius-sm: 0.125rem;
-  --radius-md: 0.1875rem;
-  --radius-lg: 0.25rem;
-  --radius-xl: 0.375rem;
+  /* Soft premium corners */
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.625rem;
+  --radius-xl: 0.875rem;
 }
 
 /*
- * Theme: VS Code "Dark+" — the observatory wears the IDE it watches.
- * Chrome:  #1e1e1e editor / #252526 panels / #007acc status bar
- * Syntax:  #c586c0 keyword · #9cdcfe variable · #dcdcaa function
- *          #ce9178 string · #6a9955 comment · #4ec9b0 type
- * Git:     #89d185 added · #e2c08d modified · #f14c4c deleted
+ * Theme: "Obsidian & Emerald" — a premium dark observatory.
+ * Surfaces: #0a0c0e canvas · #101317 cards · #171c22 raised · #1a2028 hover
+ * Accent:  #10b981 emerald · #34d399 hover · #5eead4 mint highlight
+ * Status:  #34d399 online · #fbbf24 warning · #f87171 critical
+ * Syntax:  #8fe3cf vars · #e6cf8a functions · #e2b76a folders · #7a8894 comments
  */
 :root {
-  --radius: 0.25rem;
-  --background: #1e1e1e;
-  --foreground: #cccccc;
-  --card: #252526;
-  --card-foreground: #cccccc;
-  --popover: #252526;
-  --popover-foreground: #cccccc;
-  --primary: #007acc;
-  --primary-foreground: #ffffff;
-  --secondary: #3a3d41;
-  --secondary-foreground: #ffffff;
-  --muted: #2d2d2d;
-  --muted-foreground: #9d9d9d;
-  --accent: #094771;
-  --accent-foreground: #ffffff;
-  --destructive: #f14c4c;
-  --border: #333333;
-  --input: #3c3c3c;
-  --ring: #007acc;
-  --chart-1: #007acc;
-  --chart-2: #89d185;
-  --chart-3: #cca700;
-  --chart-4: #f14c4c;
-  --chart-5: #c586c0;
-  --sidebar: #252526;
-  --sidebar-foreground: #cccccc;
-  --sidebar-primary: #007acc;
-  --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #094771;
-  --sidebar-accent-foreground: #ffffff;
-  --sidebar-border: #333333;
-  --sidebar-ring: #007acc;
+  --radius: 0.625rem;
+  --background: #0a0c0e;
+  --foreground: #d4d9de;
+  --card: #101317;
+  --card-foreground: #d4d9de;
+  --popover: #101317;
+  --popover-foreground: #d4d9de;
+  --primary: #10b981;
+  --primary-foreground: #032a20;
+  --secondary: #1b2129;
+  --secondary-foreground: #e6eaee;
+  --muted: #151a20;
+  --muted-foreground: #8b95a0;
+  --accent: #14231e;
+  --accent-foreground: #d1fae5;
+  --destructive: #ef4444;
+  --border: #1d232b;
+  --input: #242c36;
+  --ring: #34d399;
+  --chart-1: #34d399;
+  --chart-2: #5eead4;
+  --chart-3: #fbbf24;
+  --chart-4: #f87171;
+  --chart-5: #c084fc;
+  --sidebar: #0d1014;
+  --sidebar-foreground: #c6cdd4;
+  --sidebar-primary: #10b981;
+  --sidebar-primary-foreground: #032a20;
+  --sidebar-accent: #14231e;
+  --sidebar-accent-foreground: #d1fae5;
+  --sidebar-border: #1d232b;
+  --sidebar-ring: #34d399;
 
-  /* Custom vs-* scale */
-  --vs-bg: #1e1e1e;
-  --vs-panel: #252526;
-  --vs-panel-2: #2d2d2d;
-  --vs-hover: #2a2d2e;
-  --vs-active: #094771;
-  --vs-border: #2b2b2b;
-  --vs-border-2: #3c3c3c;
-  --vs-text: #cccccc;
-  --vs-bright: #e8e8e8;
-  --vs-dim: #9d9d9d;
-  --vs-faint: #6a6a6a;
-  --vs-blue: #007acc;
-  --vs-blue-hover: #1187d0;
-  --vs-blue-bright: #3794ff;
-  --vs-green: #89d185;
-  --vs-green-dim: #73c991;
-  --vs-red: #f14c4c;
-  --vs-yellow: #cca700;
-  --vs-tan: #e2c08d;
-  --vs-purple: #c586c0;
-  --vs-orange: #ce9178;
-  --vs-teal: #4ec9b0;
-  --vs-var: #9cdcfe;
-  --vs-fn: #dcdcaa;
-  --vs-comment: #6a9955;
-  --vs-folder: #dcb67a;
+  /* Custom vs-* scale (names kept for compatibility — values are the new identity) */
+  --vs-bg: #0a0c0e;
+  --vs-panel: #101317;
+  --vs-panel-2: #171c22;
+  --vs-hover: #1a2028;
+  --vs-active: #12402f;
+  --vs-border: #1d232b;
+  --vs-border-2: #2b333e;
+  --vs-text: #c6cdd4;
+  --vs-bright: #eef2f5;
+  --vs-dim: #8b95a0;
+  --vs-faint: #5b6670;
+  --vs-blue: #10b981;
+  --vs-blue-hover: #34d399;
+  --vs-blue-bright: #5eead4;
+  --vs-green: #34d399;
+  --vs-green-dim: #10b981;
+  --vs-red: #f87171;
+  --vs-yellow: #fbbf24;
+  --vs-tan: #e8c88f;
+  --vs-purple: #c084fc;
+  --vs-orange: #fb923c;
+  --vs-teal: #2dd4bf;
+  --vs-var: #8fe3cf;
+  --vs-fn: #e6cf8a;
+  --vs-comment: #7a8894;
+  --vs-folder: #e2b76a;
 }
 
 .dark {
-  --background: #1e1e1e;
-  --foreground: #cccccc;
-  --card: #252526;
-  --card-foreground: #cccccc;
-  --popover: #252526;
-  --popover-foreground: #cccccc;
-  --primary: #007acc;
-  --primary-foreground: #ffffff;
-  --secondary: #3a3d41;
-  --secondary-foreground: #ffffff;
-  --muted: #2d2d2d;
-  --muted-foreground: #9d9d9d;
-  --accent: #094771;
-  --accent-foreground: #ffffff;
-  --destructive: #f14c4c;
-  --border: #333333;
-  --input: #3c3c3c;
-  --ring: #007acc;
-  --chart-1: #007acc;
-  --chart-2: #89d185;
-  --chart-3: #cca700;
-  --chart-4: #f14c4c;
-  --chart-5: #c586c0;
-  --sidebar: #252526;
-  --sidebar-foreground: #cccccc;
-  --sidebar-primary: #007acc;
-  --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #094771;
-  --sidebar-accent-foreground: #ffffff;
-  --sidebar-border: #333333;
-  --sidebar-ring: #007acc;
+  --background: #0a0c0e;
+  --foreground: #d4d9de;
+  --card: #101317;
+  --card-foreground: #d4d9de;
+  --popover: #101317;
+  --popover-foreground: #d4d9de;
+  --primary: #10b981;
+  --primary-foreground: #032a20;
+  --secondary: #1b2129;
+  --secondary-foreground: #e6eaee;
+  --muted: #151a20;
+  --muted-foreground: #8b95a0;
+  --accent: #14231e;
+  --accent-foreground: #d1fae5;
+  --destructive: #ef4444;
+  --border: #1d232b;
+  --input: #242c36;
+  --ring: #34d399;
+  --chart-1: #34d399;
+  --chart-2: #5eead4;
+  --chart-3: #fbbf24;
+  --chart-4: #f87171;
+  --chart-5: #c084fc;
+  --sidebar: #0d1014;
+  --sidebar-foreground: #c6cdd4;
+  --sidebar-primary: #10b981;
+  --sidebar-primary-foreground: #032a20;
+  --sidebar-accent: #14231e;
+  --sidebar-accent-foreground: #d1fae5;
+  --sidebar-border: #1d232b;
+  --sidebar-ring: #34d399;
 }
 
 @layer base {
   * {
     @apply border-border outline-ring/50;
   }
+  html {
+    color-scheme: dark;
+  }
   body {
     @apply bg-background text-foreground;
+    /* Ambient depth — a faint emerald aurora anchored at the top of the canvas. */
+    background-image: radial-gradient(1100px 480px at 50% -120px, rgba(16, 185, 129, 0.06), transparent 65%);
+    background-attachment: fixed;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
   }
 }
 
 /* ------------------------------------------------------------------ */
-/* VS Code-style chrome details                                        */
+/* Premium chrome details                                              */
 /* ------------------------------------------------------------------ */
 
-/* Editor selection color */
+/* Emerald selection */
 ::selection {
-  background: #264f78;
-  color: #e8e8e8;
+  background: rgba(16, 185, 129, 0.28);
+  color: #eef7f2;
 }
 
-/* Thin IDE scrollbars */
+/* Quiet rounded scrollbars */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #4f4f4f99 transparent;
+  scrollbar-color: #262e38 transparent;
 }
 ::-webkit-scrollbar {
   width: 10px;
@@ -209,13 +219,13 @@
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #4f4f4f99;
+  background: #262e38;
   border: 2px solid transparent;
   background-clip: padding-box;
-  border-radius: 0;
+  border-radius: 8px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #5a5a5abb;
+  background: #333d49;
   border: 2px solid transparent;
   background-clip: padding-box;
 }
@@ -223,5 +233,4 @@
   background: transparent;
 }
 
-/* force-rebuild marker v2 */
-
+/* force-rebuild marker v3 */

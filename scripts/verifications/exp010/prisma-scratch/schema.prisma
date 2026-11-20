@@ -1,0 +1,22 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "/home/z/my-project/node_modules/.prisma-n1-client"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:/tmp/prisma-n1/dev.db"
+}
+
+model Parent {
+  id       Int     @id @default(autoincrement())
+  name     String
+  children Child[]
+}
+
+model Child {
+  id       Int    @id @default(autoincrement())
+  v        String
+  parentId Int
+  parent   Parent @relation(fields: [parentId], references: [id])
+}

@@ -1,0 +1,916 @@
+     1→'use client';
+     2→
+     3→import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
+     4→import { io, Socket } from 'socket.io-client';
+     5→import { Badge } from '@/components/ui/badge';
+     6→import {
+     7→  Zap, Gauge, Activity as ActivityIcon, FolderOpen, Brain, GraduationCap, Settings,
+     8→} from 'lucide-react';
+     9→import { cn } from '@/lib/utils';
+    10→
+    11→import type {
+    12→  ActivityEntry, FeedFilter, FileViewState, KnowledgeState, KnowledgeStatusFilter,
+    13→  Skill, SkillViewState, SkillsMeta, SkillFileView, SvcStatus, TreeNode, TreePayload,
+    14→  VerificationState, VRunDetail, ViewId,
+    15→} from '@/components/bridge/types';
+    16→import { VIEW_IDS, TOKEN_KEY, extractCode, timeStr } from '@/components/bridge/types';
+    17→
+    18→import { Dot } from '@/components/bridge/bits';
+    19→import { ActivityView } from '@/components/bridge/activity';
+    20→import { WorkspaceView } from '@/components/bridge/workspace';
+    21→import { KnowledgeView } from '@/components/bridge/knowledge';
+    22→import { SkillsView } from '@/components/bridge/skills';
+    23→import { SetupView } from '@/components/bridge/setup';
+    24→import { OverviewView } from '@/components/bridge/overview';
+    25→
+    26→/* ------------------------------------------------------------------ */
+    27→/* Navigation model — one place, rendered by sidebar + mobile tabs     */
+    28→/* ------------------------------------------------------------------ */
+    29→
+    30→const NAV_SECTIONS: { label: string; items: { id: ViewId; label: string; icon: React.ReactNode }[] }[] = [
+    31→  {
+    32→    label: 'Monitor',
+    33→    items: [
+    34→      { id: 'overview', label: 'Overview', icon: <Gauge className="size-4" /> },
+    35→      { id: 'activity', label: 'Activity', icon: <ActivityIcon className="size-4" /> },
+    36→      { id: 'workspace', label: 'Workspace', icon: <FolderOpen className="size-4" /> },
+    37→    ],
+    38→  },
+    39→  {
+    40→    label: 'Intelligence',
+    41→    items: [
+    42→      { id: 'knowledge', label: 'Knowledge', icon: <Brain className="size-4" /> },
+    43→      { id: 'skills', label: 'Skills', icon: <GraduationCap className="size-4" /> },
+    44→    ],
+    45→  },
+    46→  {
+    47→    label: 'Connect',
+    48→    items: [{ id: 'setup', label: 'Setup', icon: <Settings className="size-4" /> }],
+    49→  },
+    50→];
+    51→
+    52→const NAV_TITLES: Record<ViewId, string> = {
+    53→  overview: 'Overview',
+    54→  activity: 'Activity',
+    55→  workspace: 'Workspace',
+    56→  knowledge: 'Knowledge',
+    57→  skills: 'Skills',
+    58→  setup: 'Setup',
+    59→};
+    60→
+    61→/* ------------------------------------------------------------------ */
+    62→/* Page                                                                */
+    63→/* ------------------------------------------------------------------ */
+    64→export default function AgentPage() {
+    65→  /* ------------------------- connection state --------------------- */
+    66→  const [svcUp, setSvcUp] = useState(false);
+    67→  const [status, setStatus] = useState<SvcStatus>({});
+    68→  const [paired, setPaired] = useState(false);
+    69→  const [pairInput, setPairInput] = useState('');
+    70→  const [pairingNote, setPairingNote] = useState<string | null>(null);
+    71→
+    72→  /* ------------------------- workspace state ----------------------- */
+    73→  const [tree, setTree] = useState<TreePayload | null>(null);
+    74→  const [treeLoading, setTreeLoading] = useState(false);
+    75→  const [expanded, setExpanded] = useState<Set<string>>(new Set(['']));
+    76→  const [filter, setFilter] = useState('');
+    77→  const [showAllFlat, setShowAllFlat] = useState(false);
+    78→
+    79→  /* ------------------------- activity state ------------------------ */
+    80→  const [entries, setEntries] = useState<ActivityEntry[]>([]);
+    81→  const [openIds, setOpenIds] = useState<Set<string>>(new Set());
+    82→  const [feedFilter, setFeedFilter] = useState<FeedFilter>('all');
+    83→
+    84→  /* ------------------------- file viewer --------------------------- */
+    85→  const [fileView, setFileView] = useState<FileViewState | null>(null);
+    86→
+    87→  /* ------------------------- skills -------------------------------- */
+    88→  const [skills, setSkills] = useState<Skill[]>([]);
+    89→  const [skillView, setSkillView] = useState<SkillViewState | null>(null);
+    90→  const [skillsMeta, setSkillsMeta] = useState<SkillsMeta>({});
+    91→  const [skillsRefreshing, setSkillsRefreshing] = useState(false);
+    92→
+    93→  /* ------------------------- knowledge ----------------------------- */
+    94→  const [knowledge, setKnowledge] = useState<KnowledgeState | null>(null);
+    95→  const [knowledgeRefreshing, setKnowledgeRefreshing] = useState(false);
+    96→  const [knowledgeSearch, setKnowledgeSearch] = useState('');
+    97→  const [knowledgeScope, setKnowledgeScope] = useState<'all' | 'global' | 'project'>('all');
+    98→  const [knowledgeStatusFilter, setKnowledgeStatusFilter] = useState<KnowledgeStatusFilter>('all');
+    99→  const [knowledgeCategory, setKnowledgeCategory] = useState('');
+   100→  const [knowledgeSelected, setKnowledgeSelected] = useState<string | null>(null);
+   101→  const [knowledgeConfirm, setKnowledgeConfirm] = useState<string | null>(null);
+   102→  const [knowledgeActionError, setKnowledgeActionError] = useState<string | null>(null);
+   103→  const [knowledgeVersionsOpen, setKnowledgeVersionsOpen] = useState(false);
+   104→  const [knowledgeOpenVersions, setKnowledgeOpenVersions] = useState<Set<number>>(new Set());
+   105→  const [knowledgeAttemptsOpen, setKnowledgeAttemptsOpen] = useState(false);
+   106→  const [knowledgeAuditOpen, setKnowledgeAuditOpen] = useState(false);
+   107→  const knowledgeConfirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+   108→
+   109→  /* ------------------------- verification -------------------------- */
+   110→  const [verification, setVerification] = useState<VerificationState | null>(null);
+   111→  const [vRunId, setVRunId] = useState<string | null>(null);
+   112→  const [vRun, setVRun] = useState<VRunDetail | null>(null);
+   113→  const [vBusy, setVBusy] = useState(false);
+   114→  const [vError, setVError] = useState<string | null>(null);
+   115→  const [vConfirm, setVConfirm] = useState<string | null>(null);
+   116→  const vConfirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+   117→  const vRunIdRef = useRef<string | null>(null);
+   118→  useEffect(() => { vRunIdRef.current = vRunId; }, [vRunId]);
+   119→
+   120→  /* ------------------------- raw events ---------------------------- */
+   121→  const [rawEvents, setRawEvents] = useState<{ name: string; data: string; ts: number }[]>([]);
+   122→
+   123→  const socketRef = useRef<Socket | null>(null);
+   124→
+   125→  /* Reconnect kit — this page's own URL is the aiCodeAgent.serverUrl value. */
+   126→  const [pageUrl, setPageUrl] = useState('');
+   127→  useEffect(() => {
+   128→    try {
+   129→      const u = new URL(window.location.href);
+   130→      setPageUrl(u.origin + (u.pathname !== '/' ? u.pathname.replace(/\/+$/, '') : ''));
+   131→    } catch { /* ignore */ }
+   132→  }, []);
+   133→
+   134→  const pairedRef = useRef(false);
+   135→
+   136→  /* ------------------------- view routing -------------------------- */
+   137→  const [view, setView] = useState<ViewId>('overview');
+   138→  useEffect(() => {
+   139→    const applyHash = () => {
+   140→      const h = window.location.hash.replace('#', '') as ViewId;
+   141→      if (VIEW_IDS.includes(h)) setView(h);
+   142→    };
+   143→    applyHash();
+   144→    window.addEventListener('hashchange', applyHash);
+   145→    return () => window.removeEventListener('hashchange', applyHash);
+   146→  }, []);
+   147→  useEffect(() => {
+   148→    document.title = `Bridge · ${NAV_TITLES[view]}`;
+   149→  }, [view]);
+   150→  const goTo = useCallback((v: ViewId) => {
+   151→    setView(v);
+   152→    try { history.replaceState(null, '', `#${v}`); } catch { /* ignore */ }
+   153→    window.scrollTo({ top: 0 });
+   154→  }, []);
+   155→
+   156→  /* ---------------------------------------------------------------- */
+   157→  /* Socket wiring                                                     */
+   158→  /* ---------------------------------------------------------------- */
+   159→  const pushRaw = useCallback((name: string, data: unknown) => {
+   160→    setRawEvents((prev) => {
+   161→      const next = [...prev.slice(-140), { name, data: (() => { try { return JSON.stringify(data)?.slice(0, 240) ?? ''; } catch { return ''; } })(), ts: Date.now() }];
+   162→      return next;
+   163→    });
+   164→  }, []);
+   165→
+   166→  const upsertEntry = useCallback((e: ActivityEntry) => {
+   167→    setEntries((prev) => {
+   168→      const i = prev.findIndex((x) => x.id === e.id);
+   169→      if (i >= 0) {
+   170→        const next = [...prev];
+   171→        next[i] = { ...next[i], ...e };
+   172→        return next;
+   173→      }
+   174→      // dedupe notes: the same note may arrive via 'activity' AND 'operator:note'
+   175→      if (e.kind === 'note') {
+   176→        const dup = prev.find((x) => x.kind === 'note' && x.text === e.text && Math.abs((x.ts ?? 0) - (e.ts ?? 0)) < 5000);
+   177→        if (dup) return prev;
+   178→      }
+   179→      return [e, ...prev].slice(0, 300);
+   180→    });
+   181→  }, []);
+   182→
+   183→  useEffect(() => {
+   184→    // Connect to the agent service through the Caddy gateway.
+   185→    // NEVER use a port in the URL — always XTransformPort.
+   186→    // (?bridgePort=… is a debug/testing override; production default is 3003.)
+   187→    const bridgePort = new URLSearchParams(window.location.search).get('bridgePort') ?? '3003';
+   188→    const socket = io(`/?XTransformPort=${bridgePort}`, {
+   189→      transports: ['websocket', 'polling'],
+   190→      forceNew: true,
+   191→      reconnection: true,
+   192→      reconnectionAttempts: Infinity,
+   193→      reconnectionDelay: 1000,
+   194→      timeout: 15000,
+   195→    });
+   196→    socketRef.current = socket;
+   197→
+   198→    socket.on('connect', () => {
+   199→      setSvcUp(true);
+   200→      socket.emit('hello', { role: 'web', token: localStorage.getItem(TOKEN_KEY) });
+   201→    });
+   202→
+   203→    // If the bridge service ever dies, ask the Next.js server to revive it
+   204→    // (GET /api/bridge respawns the agent-service as a detached process).
+   205→    let lastRevive = 0;
+   206→    const reviveBridge = () => {
+   207→      const now = Date.now();
+   208→      if (now - lastRevive < 30_000) return;
+   209→      lastRevive = now;
+   210→      fetch('/api/bridge').catch(() => undefined);
+   211→    };
+   212→    socket.on('disconnect', () => { setSvcUp(false); reviveBridge(); });
+   213→    socket.on('connect_error', () => { setSvcUp(false); reviveBridge(); });
+   214→
+   215→    socket.on('status', (s: SvcStatus) => { setStatus(s); pushRaw('status', s); });
+   216→
+   217→    socket.on('pair:ok', (d: { token: string }) => {
+   218→      localStorage.setItem(TOKEN_KEY, d.token);
+   219→      pairedRef.current = true;
+   220→      setPaired(true);
+   221→      setPairingNote(null);
+   222→      setTreeLoading(true);
+   223→      socket.emit('activity:list');
+   224→    });
+   225→    socket.on('pair:rejected', (d: { reason: string }) => {
+   226→      setPairingNote(d?.reason ?? 'Invalid pairing code.');
+   227→    });
+   228→
+   229→    socket.on('activity:list', (d: { entries: ActivityEntry[] }) => {
+   230→      setEntries((d?.entries ?? []).slice().reverse().slice(0, 300));
+   231→      setTreeLoading(false);
+   232→    });
+   233→    socket.on('activity', (e: ActivityEntry) => { upsertEntry(e); pushRaw('activity', { id: e.id, tool: e.tool, path: e.path, source: e.source }); });
+   234→    socket.on('activity:cleared', () => { setEntries([]); });
+   235→
+   236→    socket.on('operator:note', (d: { text: string; ts: number }) => {
+   237→      // paired clients get notes via the 'activity' event; avoid double render
+   238→      if (pairedRef.current) return;
+   239→      upsertEntry({ id: `note-${d.ts}`, ts: d.ts, source: 'operator', actor: 'GLM (z.ai web)', kind: 'note', text: d.text });
+   240→    });
+   241→
+   242→    /* live pending tools (filled in by the matching activity entry) */
+   243→    socket.on('tool:call', (d: { id: string; name: string; args: Record<string, unknown> }) => {
+   244→      upsertEntry({
+   245→        id: d.id, ts: Date.now(), source: 'operator', actor: '…', kind: 'tool', tool: d.name,
+   246→        path: typeof (d.args as any)?.path === 'string' ? String((d.args as any).path) : '',
+   247→        args: d.args, pending: true,
+   248→      } as ActivityEntry);
+   249→      pushRaw('tool:call', d);
+   250→    });
+   251→    socket.on('tool:result', (d: { id: string; ok: boolean; result: string }) => {
+   252→      pushRaw('tool:result', { id: d.id, ok: d.ok });
+   253→    });
+   254→
+   255→    socket.on('workspace:tree', (t: TreePayload) => {
+   256→      setTree(t);
+   257→      setTreeLoading(false);
+   258→      pushRaw('workspace:tree', { stats: t?.stats });
+   259→    });
+   260→
+   261→    socket.on('file:content', (d: { path: string; ok: boolean; content?: string; meta?: any; error?: string }) => {
+   262→      setFileView((prev) => prev && prev.path === d.path
+   263→        ? { ...prev, loading: false, content: d.ok ? d.content : undefined, meta: d.meta, error: d.ok ? undefined : d.error, ts: Date.now() }
+   264→        : prev);
+   265→      pushRaw('file:content', { path: d.path, ok: d.ok });
+   266→    });
+   267→
+   268→    socket.on('session:cleared', () => pushRaw('session:cleared', {}));
+   269→
+   270→    /* skills — documents in the workspace .skills/ folder, learned before GLM thinks */
+   271→    socket.on('skill:list', (d: { skills?: Skill[]; scannedAt?: number; online?: boolean; note?: string }) => {
+   272→      setSkills(Array.isArray(d?.skills) ? d.skills : []);
+   273→      setSkillsMeta({ scannedAt: d?.scannedAt, online: d?.online, note: d?.note });
+   274→      pushRaw('skill:list', { count: d?.skills?.length, online: d?.online });
+   275→    });
+   276→
+   277→    /* knowledge — the shared, verification-gated experience library */
+   278→    socket.on('knowledge:state', (d: KnowledgeState) => {
+   279→      setKnowledge(d);
+   280→      setKnowledgeRefreshing(false);
+   281→      pushRaw('knowledge:state', { v: d.counts ? (d.counts.verified + d.counts.candidate) : 0 });
+   282→    });
+   283→
+   284→    /* verification — the scientific engine (live run updates) */
+   285→    socket.on('verification:state', (d: VerificationState) => {
+   286→      setVerification(d);
+   287→      pushRaw('verification:state', { runs: d.counts?.total ?? 0 });
+   288→    });
+   289→    socket.on('verification:run', (d: VRunDetail) => {
+   290→      if (d?.run?.id && d.run.id === vRunIdRef.current) setVRun(d);
+   291→    });
+   292→
+   293→    return () => {
+   294→      socket.disconnect();
+   295→    };
+   296→  }, [pushRaw, upsertEntry]);
+   297→
+   298→  /* ---------------------------------------------------------------- */
+   299→  /* Actions                                                           */
+   300→  /* ---------------------------------------------------------------- */
+   301→  const pair = (code: string) => {
+   302→    const c = extractCode(code || pairInput);
+   303→    if (c) {
+   304→      socketRef.current?.emit('pair', { code: c });
+   305→      setPairInput('');
+   306→    } else {
+   307→      setPairingNote('Enter the 6-character code shown in VS Code.');
+   308→    }
+   309→  };
+   310→
+   311→  const pasteAndPair = async () => {
+   312→    try {
+   313→      const raw = await navigator.clipboard.readText();
+   314→      const c = extractCode(raw);
+   315→      if (c) pair(c);
+   316→      else setPairingNote('No pairing code found on the clipboard.');
+   317→    } catch {
+   318→      setPairingNote('Clipboard unavailable — type the code manually.');
+   319→    }
+   320→  };
+   321→
+   322→  const refreshTree = () => {
+   323→    if (!paired) return;
+   324→    setTreeLoading(true);
+   325→    socketRef.current?.emit('tree:refresh');
+   326→    // safety: stop the spinner if no reply in 30s
+   327→    setTimeout(() => setTreeLoading(false), 30000);
+   328→  };
+   329→
+   330→  const readFile = (path: string) => {
+   331→    if (!paired) return;
+   332→    setFileView({ path, loading: true, ts: Date.now() });
+   333→    socketRef.current?.emit('file:read', { path });
+   334→  };
+   335→
+   336→  /* Open a file and jump to the Workspace view (used by verification evidence). */
+   337→  const openFileInWorkspace = (path: string) => {
+   338→    readFile(path);
+   339→    goTo('workspace');
+   340→  };
+   341→
+   342→  const clearActivity = () => socketRef.current?.emit('activity:clear');
+   343→
+   344→  const toggleEntry = (id: string) => {
+   345→    setOpenIds((prev) => {
+   346→      const next = new Set(prev);
+   347→      if (next.has(id)) next.delete(id); else next.add(id);
+   348→      return next;
+   349→    });
+   350→  };
+   351→
+   352→  /* ---------------------------------------------------------------- */
+   353→  /* Skills                                                            */
+   354→  /* ---------------------------------------------------------------- */
+   355→  const refreshSkills = () => {
+   356→    if (!paired) return;
+   357→    setSkillsRefreshing(true);
+   358→    socketRef.current?.emit('skill:refresh', {}, (r: { ok?: boolean; skills?: Skill[]; scannedAt?: number; online?: boolean; note?: string; error?: string }) => {
+   359→      setSkillsRefreshing(false);
+   360→      if (Array.isArray(r?.skills)) setSkills(r.skills);
+   361→      setSkillsMeta({ scannedAt: r?.scannedAt, online: r?.online, note: r?.note ?? r?.error });
+   362→    });
+   363→    // safety: stop the spinner if no reply in 30s
+   364→    setTimeout(() => setSkillsRefreshing(false), 30000);
+   365→  };
+   366→
+   367→  const openSkill = (name: string) => {
+   368→    setSkillView({ name, loading: true });
+   369→    socketRef.current?.emit('skill:get', { name }, (r: { ok?: boolean; skill?: Skill; content?: string; files?: SkillFileView[]; error?: string }) => {
+   370→      if (!r?.ok) {
+   371→        setSkillView({ name, loading: false, error: r?.error ?? 'Could not read the skill.' });
+   372→        return;
+   373→      }
+   374→      const files = Array.isArray(r.files) ? r.files : undefined;
+   375→      const mainMeta = r.skill?.files?.find((m) => m.main);
+   376→      const activeFile = files && files.length > 0
+   377→        ? (files.find((f) => f.path === mainMeta?.path)?.path ?? files[0].path)
+   378→        : undefined;
+   379→      setSkillView({ name, loading: false, skill: r.skill, content: r.content, files, activeFile });
+   380→    });
+   381→  };
+   382→
+   383→  const selectSkillFile = (path: string) => {
+   384→    setSkillView((v) => (v ? { ...v, activeFile: path } : v));
+   385→  };
+   386→
+   387→  /* ---------------------------------------------------------------- */
+   388→  /* Knowledge                                                         */
+   389→  /* ---------------------------------------------------------------- */
+   390→  const knowledgeAction = (action: string, opts: { id?: string; version?: number; reason?: string }, onDone?: (r: { ok?: boolean; error?: string }) => void) => {
+   391→    if (!paired) return;
+   392→    socketRef.current?.emit('knowledge:action', { action, ...opts }, (r: { ok?: boolean; error?: string }) => { onDone?.(r); });
+   393→  };
+   394→
+   395→  const refreshKnowledge = () => {
+   396→    if (!paired) return;
+   397→    setKnowledgeRefreshing(true);
+   398→    knowledgeAction('refresh', {}, () => setKnowledgeRefreshing(false));
+   399→    // safety: stop the spinner if no reply in 30s
+   400→    setTimeout(() => setKnowledgeRefreshing(false), 30000);
+   401→  };
+   402→
+   403→  const selectKnowledge = (id: string) => {
+   404→    setKnowledgeSelected((prev) => (prev === id ? null : id));
+   405→    setKnowledgeConfirm(null);
+   406→    setKnowledgeActionError(null);
+   407→    setKnowledgeOpenVersions(new Set());
+   408→    setVRunId(null);
+   409→    setVRun(null);
+   410→    setVError(null);
+   411→    if (knowledgeConfirmTimer.current) clearTimeout(knowledgeConfirmTimer.current);
+   412→  };
+   413→
+   414→  const toggleKnowledgeVersion = (version: number) => {
+   415→    setKnowledgeOpenVersions((prev) => {
+   416→      const next = new Set(prev);
+   417→      if (next.has(version)) next.delete(version); else next.add(version);
+   418→      return next;
+   419→    });
+   420→  };
+   421→
+   422→  /* Destructive actions ask for a second click within 4s ("confirm?") before firing. */
+   423→  const runKnowledgeAction = (action: string, opts: { id?: string; version?: number; reason?: string }, needsConfirm = false) => {
+   424→    if (needsConfirm) {
+   425→      if (knowledgeConfirm !== action) {
+   426→        setKnowledgeConfirm(action);
+   427→        if (knowledgeConfirmTimer.current) clearTimeout(knowledgeConfirmTimer.current);
+   428→        knowledgeConfirmTimer.current = setTimeout(() => setKnowledgeConfirm(null), 4000);
+   429→        return;
+   430→      }
+   431→      if (knowledgeConfirmTimer.current) clearTimeout(knowledgeConfirmTimer.current);
+   432→      setKnowledgeConfirm(null);
+   433→    }
+   434→    setKnowledgeActionError(null);
+   435→    knowledgeAction(action, opts, (r) => {
+   436→      if (r?.ok === false) setKnowledgeActionError(r?.error || `knowledge: ${action} failed`);
+   437→      // always re-sync so the panel matches the server-side store
+   438→      setKnowledgeRefreshing(true);
+   439→      knowledgeAction('refresh', {}, () => setKnowledgeRefreshing(false));
+   440→      setTimeout(() => setKnowledgeRefreshing(false), 30000);
+   441→    });
+   442→  };
+   443→
+   444→  /* ---------------------------------------------------------------- */
+   445→  /* Verification — owner actions (start / cancel / feedback)           */
+   446→  /* Execution begins only when the owner reviews the plan and presses  */
+   447→  /* Start.                                                             */
+   448→  /* ---------------------------------------------------------------- */
+   449→  const verificationAction = (action: string, opts: { runId?: string; decision?: string; comment?: string; confirmDangerous?: boolean }, onDone?: (r: { ok?: boolean; error?: string; detail?: VRunDetail }) => void) => {
+   450→    if (!paired) return;
+   451→    socketRef.current?.emit('verification:action', { action, ...opts }, (r: { ok?: boolean; error?: string; detail?: VRunDetail }) => { onDone?.(r); });
+   452→  };
+   453→
+   454→  const selectVRun = (id: string) => {
+   455→    const next = vRunId === id ? null : id;
+   456→    setVRunId(next);
+   457→    setVRun(null);
+   458→    setVError(null);
+   459→    if (next) {
+   460→      setVBusy(true);
+   461→      verificationAction('get', { runId: next }, (r) => {
+   462→        setVBusy(false);
+   463→        if (r?.ok && r.detail) setVRun(r.detail);
+   464→        else if (r?.ok === false) setVError(r.error || 'could not load the run');
+   465→      });
+   466→    }
+   467→  };
+   468→
+   469→  const runVAction = (kind: 'start' | 'cancel', runId: string, dangerous = false) => {
+   470→    if (kind === 'start' && dangerous && vConfirm !== `vstart:${runId}`) {
+   471→      setVConfirm(`vstart:${runId}`);
+   472→      if (vConfirmTimer.current) clearTimeout(vConfirmTimer.current);
+   473→      vConfirmTimer.current = setTimeout(() => setVConfirm(null), 5000);
+   474→      return;
+   475→    }
+   476→    if (vConfirmTimer.current) clearTimeout(vConfirmTimer.current);
+   477→    setVConfirm(null);
+   478→    setVError(null);
+   479→    setVBusy(true);
+   480→    verificationAction(kind, { runId, confirmDangerous: dangerous }, (r) => {
+   481→      setVBusy(false);
+   482→      if (r?.ok === false) setVError(r.error || `verification: ${kind} failed`);
+   483→    });
+   484→  };
+   485→
+   486→  const sendVFeedback = (runId: string, decision: 'accept' | 'reject' | 'comment', comment: string) => {
+   487→    setVBusy(true);
+   488→    verificationAction('feedback', { runId, decision, comment }, (r) => {
+   489→      setVBusy(false);
+   490→      if (r?.ok === false) setVError(r.error || 'feedback failed');
+   491→    });
+   492→  };
+   493→
+   494→  const wsOnline = !!status.workspaceOnline;
+   495→
+   496→  /* ---------------------------------------------------------------- */
+   497→  /* Derived data                                                      */
+   498→  /* ---------------------------------------------------------------- */
+   499→  const stats = useMemo(() => {
+   500→    let reads = 0, writes = 0, edits = 0, deletes = 0, notes = 0, localEvents = 0;
+   501→    for (const e of entries) {
+   502→      if (e.kind === 'tool' && e.source !== 'system') {
+   503→        if (e.tool === 'read_file') reads++;
+   504→        else if (e.tool === 'write_file') writes++;
+   505→        else if (e.tool === 'edit_file') edits++;
+   506→        else if (e.tool === 'delete_file') deletes++;
+   507→      }
+   508→      if (e.kind === 'note') notes++;
+   509→      if (e.kind === 'fs') localEvents++;
+   510→    }
+   511→    return { reads, writes, edits, deletes, notes, localEvents };
+   512→  }, [entries]);
+   513→
+   514→  const feed = useMemo(() => {
+   515→    const list = entries.filter((e) =>
+   516→      feedFilter === 'all' ? true
+   517→        : feedFilter === 'ai' ? (e.kind === 'tool' && e.source !== 'system') || e.kind === 'note' || e.kind === 'skill' || e.kind === 'knowledge'
+   518→          : feedFilter === 'you' ? e.source === 'local'
+   519→            : e.source === 'system' || (e.kind === 'conn'));
+   520→    return list.slice(0, 150);
+   521→  }, [entries, feedFilter]);
+   522→
+   523→  /* flattened visible rows for the explorer */
+   524→  const rows = useMemo(() => {
+   525→    if (!tree?.tree?.children) return [] as { node: TreeNode; depth: number }[];
+   526→    const out: { node: TreeNode; depth: number }[] = [];
+   527→    const q = filter.trim().toLowerCase();
+   528→
+   529→    if (q) {
+   530→      // flat search across the whole tree
+   531→      const hits: TreeNode[] = [];
+   532→      const walk = (n: TreeNode) => {
+   533→        for (const c of n.children ?? []) {
+   534→          if (c.type === 'file' && c.path.toLowerCase().includes(q)) hits.push(c);
+   535→          if (c.type === 'dir') walk(c);
+   536→        }
+   537→      };
+   538→      walk(tree.tree);
+   539→      return hits.slice(0, showAllFlat ? 1000 : 300).map((node) => ({ node, depth: 0 }));
+   540→    }
+   541→
+   542→    const walk = (n: TreeNode, depth: number) => {
+   543→      for (const c of n.children ?? []) {
+   544→        out.push({ node: c, depth });
+   545→        if (c.type === 'dir' && expanded.has(c.path)) walk(c, depth + 1);
+   546→      }
+   547→    };
+   548→    walk(tree.tree, 0);
+   549→    return out.slice(0, 2500);
+   550→  }, [tree, expanded, filter, showAllFlat]);
+   551→
+   552→  const totalFlatHits = useMemo(() => {
+   553→    if (!filter.trim() || !tree?.tree) return 0;
+   554→    let count = 0;
+   555→    const q = filter.trim().toLowerCase();
+   556→    const walk = (n: TreeNode) => {
+   557→      for (const c of n.children ?? []) {
+   558→        if (c.type === 'file' && c.path.toLowerCase().includes(q)) count++;
+   559→        if (c.type === 'dir') walk(c);
+   560→      }
+   561→    };
+   562→    walk(tree.tree);
+   563→    return count;
+   564→  }, [tree, filter]);
+   565→
+   566→  /* knowledge derivations */
+   567→  const knowledgeCounts = knowledge?.counts;
+   568→  const knowledgeTotal = knowledgeCounts
+   569→    ? (knowledgeCounts.verified ?? 0) + (knowledgeCounts.candidate ?? 0) + (knowledgeCounts.verificationPending ?? 0)
+   570→      + (knowledgeCounts.rejected ?? 0) + (knowledgeCounts.deprecated ?? 0) + (knowledgeCounts.archived ?? 0)
+   571→    : 0;
+   572→  const knowledgeEmpty = !!knowledgeCounts
+   573→    && (knowledgeCounts.verified ?? 0) === 0 && (knowledgeCounts.candidate ?? 0) === 0 && (knowledgeCounts.verificationPending ?? 0) === 0
+   574→    && (knowledgeCounts.rejected ?? 0) === 0 && (knowledgeCounts.deprecated ?? 0) === 0 && (knowledgeCounts.archived ?? 0) === 0;
+   575→
+   576→  const knowledgeCategories = useMemo(() => {
+   577→    const set = new Set<string>();
+   578→    for (const r of knowledge?.experiences ?? []) if (r.category) set.add(r.category);
+   579→    return Array.from(set).sort();
+   580→  }, [knowledge]);
+   581→
+   582→  const knowledgeRecords = useMemo(() => {
+   583→    const q = knowledgeSearch.trim().toLowerCase();
+   584→    return (knowledge?.experiences ?? []).filter((r) => {
+   585→      if (knowledgeScope !== 'all' && r.scope !== knowledgeScope) return false;
+   586→      if (knowledgeStatusFilter !== 'all' && r.status !== knowledgeStatusFilter) return false;
+   587→      if (knowledgeCategory && r.category !== knowledgeCategory) return false;
+   588→      if (q && !`${r.id} ${r.title} ${r.problemSummary} ${r.category}`.toLowerCase().includes(q)) return false;
+   589→      return true;
+   590→    });
+   591→  }, [knowledge, knowledgeSearch, knowledgeScope, knowledgeStatusFilter, knowledgeCategory]);
+   592→
+   593→  const selectedKnowledge = useMemo(
+   594→    () => (knowledgeSelected ? (knowledge?.experiences ?? []).find((r) => r.id === knowledgeSelected) ?? null : null),
+   595→    [knowledge, knowledgeSelected]
+   596→  );
+   597→
+   598→  const selectedKnowledgeVersions = useMemo(
+   599→    () => (selectedKnowledge?.versions ?? []).slice().sort((a, b) => b.version - a.version),
+   600→    [selectedKnowledge]
+   601→  );
+   602→
+   603→  const activeKnowledgeVersion = useMemo(() => {
+   604→    if (!selectedKnowledge) return null;
+   605→    return (selectedKnowledge.versions ?? []).find((v) => v.version === selectedKnowledge.activeVersion)
+   606→      ?? selectedKnowledgeVersions[0]
+   607→      ?? null;
+   608→  }, [selectedKnowledge, selectedKnowledgeVersions]);
+   609→
+   610→  const selectedKnowledgeFeedback = useMemo(
+   611→    () => (knowledge?.feedback ?? []).filter((f) => f.experienceId === selectedKnowledge?.id),
+   612→    [knowledge, selectedKnowledge]
+   613→  );
+   614→
+   615→  const recordRuns = useMemo(
+   616→    () => (verification?.runs ?? []).filter((r) => r.knowledgeId === (selectedKnowledge?.id ?? '\u0000')),
+   617→    [verification, selectedKnowledge]
+   618→  );
+   619→
+   620→  const toggleDir = (path: string) => {
+   621→    setExpanded((prev) => {
+   622→      const next = new Set(prev);
+   623→      if (next.has(path)) next.delete(path);
+   624→      else next.add(path);
+   625→      return next;
+   626→    });
+   627→  };
+   628→
+   629→  /* nav badge counts */
+   630→  const navCounts: Partial<Record<ViewId, number>> = {
+   631→    activity: entries.length,
+   632→    knowledge: knowledgeTotal,
+   633→    skills: skills.length,
+   634→  };
+   635→
+   636→  /* ---------------------------------------------------------------- */
+   637→  /* Render                                                            */
+   638→  /* ---------------------------------------------------------------- */
+   639→  return (
+   640→    <div className="min-h-screen bg-vs-bg text-vs-text">
+   641→      <div className="flex">
+   642→        {/* Sidebar (desktop) */}
+   643→        <aside className="hidden lg:flex w-60 flex-none flex-col sticky top-0 h-screen bg-vs-panel border-r border-vs-border">
+   644→          {/* brand */}
+   645→          <div className="flex items-center gap-2.5 px-4 h-14 border-b border-vs-border/70 flex-none">
+   646→            <div className="size-8 rounded-lg bg-vs-blue/15 border border-vs-blue/40 grid place-items-center flex-none">
+   647→              <Zap className="size-4 text-vs-blue-bright" />
+   648→            </div>
+   649→            <div className="min-w-0">
+   650→              <div className="text-[13px] font-semibold text-vs-bright leading-tight truncate">Workspace Bridge</div>
+   651→              <div className="text-[10px] text-vs-faint leading-tight">z.ai observatory</div>
+   652→            </div>
+   653→          </div>
+   654→
+   655→          {/* nav */}
+   656→          <nav className="flex-1 overflow-y-auto px-2.5 py-3 space-y-4">
+   657→            {NAV_SECTIONS.map((section) => (
+   658→              <div key={section.label}>
+   659→                <div className="px-3 pb-1.5 text-[10px] uppercase tracking-wider text-vs-faint">{section.label}</div>
+   660→                <div className="space-y-0.5">
+   661→                  {section.items.map((item) => (
+   662→                    <button
+   663→                      key={item.id}
+   664→                      suppressHydrationWarning
+   665→                      onClick={() => goTo(item.id)}
+   666→                      className={cn(
+   667→                        'w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] transition-colors',
+   668→                        view === item.id ? 'bg-vs-active text-white font-medium' : 'text-vs-dim hover:bg-vs-hover hover:text-vs-text'
+   669→                      )}
+   670→                      aria-current={view === item.id ? 'page' : undefined}
+   671→                    >
+   672→                      <span className="flex-none">{item.icon}</span>
+   673→                      <span className="flex-1 text-left truncate">{item.label}</span>
+   674→                      {(navCounts[item.id] ?? 0) > 0 && (
+   675→                        <span className="text-[10px] font-mono text-vs-faint flex-none">{navCounts[item.id]}</span>
+   676→                      )}
+   677→                    </button>
+   678→                  ))}
+   679→                </div>
+   680→              </div>
+   681→            ))}
+   682→          </nav>
+   683→
+   684→          {/* connection status */}
+   685→          <div className="flex-none border-t border-vs-border/70 px-4 py-3.5 space-y-2.5">
+   686→            <div className="flex items-center gap-2.5 min-w-0" title={`bridge service ${svcUp ? 'online' : 'offline'}`}>
+   687→              <Dot tone={svcUp ? 'green' : 'red'} />
+   688→              <span className="text-[11px] text-vs-dim flex-1 truncate">service</span>
+   689→              <span className={`text-[11px] flex-none ${svcUp ? 'text-vs-green' : 'text-vs-red'}`}>{svcUp ? 'online' : 'offline'}</span>
+   690→            </div>
+   691→            <div className="flex items-center gap-2.5 min-w-0" title={wsOnline ? status.workspaceName ?? 'workspace online' : 'workspace offline'}>
+   692→              <Dot tone={wsOnline ? 'green' : 'yellow'} />
+   693→              <span className="text-[11px] text-vs-dim flex-1 truncate">workspace</span>
+   694→              <span className={`text-[11px] flex-none truncate max-w-[7rem] ${wsOnline ? 'text-vs-text' : 'text-vs-yellow'}`}>
+   695→                {wsOnline ? status.workspaceName ?? 'online' : 'offline'}
+   696→              </span>
+   697→            </div>
+   698→            <div className="flex items-center gap-2.5 min-w-0">
+   699→              <Dot tone={paired ? 'green' : 'dim'} />
+   700→              <span className="text-[11px] text-vs-dim flex-1 truncate">browser</span>
+   701→              <span className={`text-[11px] flex-none ${paired ? 'text-vs-green' : 'text-vs-faint'}`}>{paired ? 'paired' : 'unpaired'}</span>
+   702→            </div>
+   703→          </div>
+   704→        </aside>
+   705→
+   706→        {/* Main column */}
+   707→        <div className="flex-1 min-w-0 flex flex-col min-h-screen">
+   708→          {/* Mobile header */}
+   709→          <header className="lg:hidden sticky top-0 z-30 bg-vs-panel/95 backdrop-blur border-b border-vs-border flex-none">
+   710→            <div className="flex items-center gap-2.5 px-4 h-12">
+   711→              <div className="size-7 rounded-md bg-vs-blue/15 border border-vs-blue/40 grid place-items-center flex-none">
+   712→                <Zap className="size-3.5 text-vs-blue-bright" />
+   713→              </div>
+   714→              <span className="text-[13px] font-semibold text-vs-bright truncate">Workspace Bridge</span>
+   715→              <div className="flex-1" />
+   716→              <Dot tone={svcUp ? 'green' : 'red'} className="size-1.5" />
+   717→              <Dot tone={wsOnline ? 'green' : 'yellow'} className="size-1.5" />
+   718→              {paired && (
+   719→                <Badge variant="outline" className="border-vs-green/40 text-vs-green text-[10px] px-1.5">paired</Badge>
+   720→              )}
+   721→            </div>
+   722→            <nav className="flex gap-1 px-3 pb-2 overflow-x-auto" aria-label="Views">
+   723→              {NAV_SECTIONS.flatMap((s) => s.items).map((item) => (
+   724→                <button
+   725→                  key={item.id}
+   726→                  suppressHydrationWarning
+   727→                  onClick={() => goTo(item.id)}
+   728→                  className={cn(
+   729→                    'flex-none flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs whitespace-nowrap transition-colors',
+   730→                    view === item.id ? 'bg-vs-active text-white font-medium' : 'text-vs-dim hover:bg-vs-hover hover:text-vs-text'
+   731→                  )}
+   732→                  aria-current={view === item.id ? 'page' : undefined}
+   733→                >
+   734→                  <span className="flex-none -ml-0.5">{item.icon}</span>
+   735→                  {item.label}
+   736→                  {(navCounts[item.id] ?? 0) > 0 && (
+   737→                    <span className="text-[10px] font-mono opacity-70">{navCounts[item.id]}</span>
+   738→                  )}
+   739→                </button>
+   740→              ))}
+   741→            </nav>
+   742→          </header>
+   743→
+   744→          {/* Content */}
+   745→          <main className="flex-1 w-full max-w-[1400px] mx-auto px-4 sm:px-6 py-5 min-w-0">
+   746→            {view === 'overview' && (
+   747→              <OverviewView
+   748→                paired={paired}
+   749→                svcUp={svcUp}
+   750→                wsOnline={wsOnline}
+   751→                status={status}
+   752→                tree={tree}
+   753→                skills={skills}
+   754→                knowledge={knowledge}
+   755→                verification={verification}
+   756→                stats={stats}
+   757→                feed={feed}
+   758→                onGoTo={goTo}
+   759→                pairInput={pairInput}
+   760→                onPairInputChange={setPairInput}
+   761→                onPair={pair}
+   762→                onPasteAndPair={pasteAndPair}
+   763→                pairingNote={pairingNote}
+   764→              />
+   765→            )}
+   766→
+   767→            {view === 'activity' && (
+   768→              <ActivityView
+   769→                paired={paired}
+   770→                feed={feed}
+   771→                feedFilter={feedFilter}
+   772→                onFilterChange={setFeedFilter}
+   773→                openIds={openIds}
+   774→                onToggleEntry={toggleEntry}
+   775→                onClear={clearActivity}
+   776→                rawEvents={rawEvents}
+   777→                onClearRaw={() => setRawEvents([])}
+   778→              />
+   779→            )}
+   780→
+   781→            {view === 'workspace' && (
+   782→              <WorkspaceView
+   783→                paired={paired}
+   784→                wsOnline={wsOnline}
+   785→                tree={tree}
+   786→                treeLoading={treeLoading}
+   787→                filter={filter}
+   788→                onFilterChange={setFilter}
+   789→                onRefresh={refreshTree}
+   790→                rows={rows}
+   791→                expandedPaths={expanded}
+   792→                onToggleDir={toggleDir}
+   793→                onOpenFile={readFile}
+   794→                fileView={fileView}
+   795→                onCloseFile={() => setFileView(null)}
+   796→                totalFlatHits={totalFlatHits}
+   797→                showAllFlat={showAllFlat}
+   798→                onShowAllFlat={setShowAllFlat}
+   799→                onCollapseAll={() => setExpanded(new Set(['']))}
+   800→                workspaceName={status.workspaceName}
+   801→              />
+   802→            )}
+   803→
+   804→            {view === 'knowledge' && (
+   805→              <KnowledgeView
+   806→                paired={paired}
+   807→                knowledge={knowledge}
+   808→                refreshing={knowledgeRefreshing}
+   809→                onRefresh={refreshKnowledge}
+   810→                search={knowledgeSearch}
+   811→                onSearchChange={setKnowledgeSearch}
+   812→                scope={knowledgeScope}
+   813→                onScopeChange={setKnowledgeScope}
+   814→                statusFilter={knowledgeStatusFilter}
+   815→                onStatusFilterChange={setKnowledgeStatusFilter}
+   816→                category={knowledgeCategory}
+   817→                onCategoryChange={setKnowledgeCategory}
+   818→                records={knowledgeRecords}
+   819→                categories={knowledgeCategories}
+   820→                counts={knowledgeCounts}
+   821→                total={knowledgeTotal}
+   822→                empty={knowledgeEmpty}
+   823→                selected={selectedKnowledge}
+   824→                activeVersion={activeKnowledgeVersion}
+   825→                selectedVersions={selectedKnowledgeVersions}
+   826→                feedback={selectedKnowledgeFeedback}
+   827→                onSelect={selectKnowledge}
+   828→                versionsOpen={knowledgeVersionsOpen}
+   829→                onVersionsOpenChange={setKnowledgeVersionsOpen}
+   830→                openVersions={knowledgeOpenVersions}
+   831→                onToggleVersion={toggleKnowledgeVersion}
+   832→                attemptsOpen={knowledgeAttemptsOpen}
+   833→                onAttemptsOpenChange={setKnowledgeAttemptsOpen}
+   834→                auditOpen={knowledgeAuditOpen}
+   835→                onAuditOpenChange={setKnowledgeAuditOpen}
+   836→                confirm={knowledgeConfirm}
+   837→                actionError={knowledgeActionError}
+   838→                onAction={runKnowledgeAction}
+   839→                recordRuns={recordRuns}
+   840→                vRunId={vRunId}
+   841→                onSelectVRun={selectVRun}
+   842→                vRun={vRun}
+   843→                vBusy={vBusy}
+   844→                vError={vError}
+   845→                vConfirm={vConfirm}
+   846→                onVStart={(runId, dangerous) => runVAction('start', runId, dangerous)}
+   847→                onVCancel={(runId) => runVAction('cancel', runId)}
+   848→                onVFeedback={sendVFeedback}
+   849→                onOpenFile={openFileInWorkspace}
+   850→                verificationTotal={verification?.counts?.total ?? 0}
+   851→              />
+   852→            )}
+   853→
+   854→            {view === 'skills' && (
+   855→              <SkillsView
+   856→                paired={paired}
+   857→                wsOnline={wsOnline}
+   858→                skills={skills}
+   859→                skillsMeta={skillsMeta}
+   860→                refreshing={skillsRefreshing}
+   861→                onRefresh={refreshSkills}
+   862→                skillView={skillView}
+   863→                onClose={() => setSkillView(null)}
+   864→                onOpen={openSkill}
+   865→                onSelectFile={selectSkillFile}
+   866→              />
+   867→            )}
+   868→
+   869→            {view === 'setup' && (
+   870→              <SetupView
+   871→                paired={paired}
+   872→                svcUp={svcUp}
+   873→                wsOnline={wsOnline}
+   874→                status={status}
+   875→                pageUrl={pageUrl}
+   876→                pairInput={pairInput}
+   877→                onPairInputChange={setPairInput}
+   878→                onPair={pair}
+   879→                onPasteAndPair={pasteAndPair}
+   880→                pairingNote={pairingNote}
+   881→              />
+   882→            )}
+   883→          </main>
+   884→
+   885→          {/* Status bar — VS Code-style observability strip */}
+   886→          <footer className="mt-auto bg-vs-blue text-white text-[10.5px] font-mono min-h-7 px-3 py-1 pb-[max(0.25rem,env(safe-area-inset-bottom))] flex items-center gap-4 overflow-hidden whitespace-nowrap select-none">
+   887→            <span className="flex items-center gap-1.5 shrink-0">
+   888→              <Zap className="size-3" />
+   889→              <span className="hidden sm:inline">workspace bridge</span>
+   890→            </span>
+   891→            <span className="flex items-center gap-1.5 shrink-0">
+   892→              <span className={`size-1.5 rounded-full inline-block ${svcUp ? 'bg-white' : 'bg-white/30'}`} />
+   893→              {svcUp ? 'service online' : 'service offline'}
+   894→            </span>
+   895→            <span className="flex items-center gap-1.5 shrink-0">
+   896→              <span className={`size-1.5 rounded-full inline-block ${wsOnline ? 'bg-white' : 'bg-white/30'}`} />
+   897→              {wsOnline ? status.workspaceName ?? 'workspace' : 'workspace offline'}
+   898→            </span>
+   899→            {paired && <span className="shrink-0 hidden sm:inline">paired</span>}
+   900→            <span className="flex-1" />
+   901→            {tree?.stats && <span className="shrink-0 hidden md:inline">{tree.stats.files.toLocaleString()} files</span>}
+   902→            {skills.length > 0 && (
+   903→              <span className="shrink-0 hidden md:inline">{skills.length} skills</span>
+   904→            )}
+   905→            {(knowledge?.counts?.verified ?? 0) > 0 && (
+   906→              <span className="shrink-0 hidden md:inline">{knowledge?.counts?.verified} verified</span>
+   907→            )}
+   908→            <span className="shrink-0 hidden md:inline">{entries.length} events</span>
+   909→            {tree?.stats?.scannedAt && <span className="shrink-0 hidden lg:inline">scan {timeStr(new Date(tree.stats.scannedAt).getTime())}</span>}
+   910→          </footer>
+   911→        </div>
+   912→      </div>
+   913→    </div>
+   914→  );
+   915→}
+   916→

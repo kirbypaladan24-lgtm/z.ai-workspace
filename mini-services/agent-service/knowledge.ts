@@ -74,6 +74,17 @@ export interface ExperienceVersion {
   verificationSummary: string;
   evidence: EvidenceItem[];
   supersedes?: number;
+  /**
+   * When this proposal ALSO corrected record-level fields (title /
+   * problemSummary — e.g. to retract an unsupported superlative that lives
+   * outside the versioned fields), the prior values are preserved here
+   * verbatim. The revision never overwrites historical knowledge: v1's
+   * wording stays inspectable on the version that caused the change.
+   */
+  recordFieldChanges?: {
+    title?: { from: string; to: string };
+    problemSummary?: { from: string; to: string };
+  };
 }
 
 export interface ExperienceRecord {
@@ -470,6 +481,11 @@ function audit(
   if (store.audit.length > MAX_AUDIT_IN_MEMORY) {
     store.audit.splice(0, store.audit.length - MAX_AUDIT_IN_MEMORY);
   }
+  // Every audit append must persist: audit.jsonl is append-only history, and
+  // a line that exists only in memory is lost on restart. (This exact gap
+  // dropped 9 propose audit lines on 2026-11-19 — see AUD-000036 in the
+  // store. Call sites that also set dirty.audit are harmless duplicates.)
+  dirty.audit = true;
   return rec;
 }
 
@@ -501,17 +517,25 @@ async function persistDirty(actor: string): Promise<{ ok: boolean; error?: strin
   if (!deps) {
     return { ok: false, error: 'module not initialized' };
   }
-  const writes: Array<Promise<boolean>> = [];
-  if (dirty.experiences) writes.push(wsWriteFile(FILES.experiences, toJsonl(store.experiences)));
-  if (dirty.attempts) writes.push(wsWriteFile(FILES.attempts, toJsonl(store.attempts)));
-  if (dirty.feedback) writes.push(wsWriteFile(FILES.feedback, toJsonl(store.feedback)));
-  if (dirty.audit) writes.push(wsWriteFile(FILES.audit, toJsonl(store.audit)));
-  if (dirty.meta) writes.push(wsWriteFile(FILES.meta, JSON.stringify(store.meta, null, 2)));
-  const results = await Promise.all(writes);
-  dirty.experiences = dirty.attempts = dirty.feedback = dirty.audit = dirty.meta = false;
+  const writes: Array<{ flag: 'experiences' | 'attempts' | 'feedback' | 'audit' | 'meta'; p: Promise<boolean> }> = [];
+  if (dirty.experiences) writes.push({ flag: 'experiences', p: wsWriteFile(FILES.experiences, toJsonl(store.experiences)) });
+  if (dirty.attempts) writes.push({ flag: 'attempts', p: wsWriteFile(FILES.attempts, toJsonl(store.attempts)) });
+  if (dirty.feedback) writes.push({ flag: 'feedback', p: wsWriteFile(FILES.feedback, toJsonl(store.feedback)) });
+  if (dirty.audit) writes.push({ flag: 'audit', p: wsWriteFile(FILES.audit, toJsonl(store.audit)) });
+  if (dirty.meta) writes.push({ flag: 'meta', p: wsWriteFile(FILES.meta, JSON.stringify(store.meta, null, 2)) });
+  const results = await Promise.all(writes.map((w) => w.p));
+  /* Clear a dirty flag ONLY when its write succeeded: clearing on failure
+   * leaves the mutation memory-only (the AUD-000036 incident class — a
+   * failed flush must be retried by the next persist, not silently
+   * forgotten). */
+  let anyFailed = false;
+  for (let i = 0; i < writes.length; i++) {
+    if (results[i]) dirty[writes[i].flag] = false;
+    else anyFailed = true;
+  }
   persistLocalCache();
-  if (results.some((ok) => !ok)) {
-    return { ok: false, error: 'writing the knowledge store to the workspace failed — retry the operation' };
+  if (anyFailed) {
+    return { ok: false, error: 'writing the knowledge store to the workspace failed — the failed file(s) stay dirty and will be retried on the next write' };
   }
   void actor;
   return { ok: true };
@@ -1089,6 +1113,15 @@ export interface ProposalInput {
   limitations?: string;
   compatibilityNotes?: string;
   reason?: string;
+  /**
+   * Optional corrections of RECORD-LEVEL metadata (title / problemSummary).
+   * Used when a technical review retracts a claim that lives outside the
+   * versioned fields. The original values are snapshotted verbatim into the
+   * new version's recordFieldChanges before the record is updated — the
+   * active pointer still does not move until the proposal passes the gate.
+   */
+  title?: string;
+  problemSummary?: string;
 }
 
 async function proposeImprovement(
@@ -1112,6 +1145,21 @@ async function proposeImprovement(
     const maxV = exp.versions.reduce((m, v) => Math.max(m, v.version), 0);
     const proposedVersion = maxV + 1;
     const previousActive = exp.activeVersion;
+
+    // Record-level corrections (title / problemSummary) are snapshotted BEFORE
+    // the record is touched, so the prior wording survives verbatim on the
+    // version that caused the change (plan §9: revisions, never overwrites).
+    const newTitle = String(input.title ?? '').trim();
+    const newProblem = String(input.problemSummary ?? '').trim();
+    const recordFieldChanges: NonNullable<ExperienceVersion['recordFieldChanges']> = {};
+    if (newTitle && newTitle !== exp.title) {
+      recordFieldChanges.title = { from: exp.title, to: truncate(newTitle, 300) };
+    }
+    if (newProblem && newProblem !== exp.problemSummary) {
+      recordFieldChanges.problemSummary = { from: exp.problemSummary, to: truncate(newProblem, 2000) };
+    }
+    const revisedRecordFields = Object.keys(recordFieldChanges);
+
     exp.versions.push({
       version: proposedVersion,
       createdBy: actor,
@@ -1128,7 +1176,11 @@ async function proposeImprovement(
       verificationSummary: 'proposal awaiting verification — the currently active version stays trusted until this passes the gate',
       evidence: [],
       supersedes: previousActive,
+      ...(revisedRecordFields.length > 0 ? { recordFieldChanges } : {}),
     });
+    // Apply the record-level corrections only after the snapshot is stored.
+    if (recordFieldChanges.title) exp.title = recordFieldChanges.title.to;
+    if (recordFieldChanges.problemSummary) exp.problemSummary = recordFieldChanges.problemSummary.to;
     // The active pointer does NOT move yet. A previously rejected/deprecated
     // record becomes a candidate again; a verified one stays verified (v-old).
     if (exp.status === 'rejected' || exp.status === 'deprecated') exp.status = 'candidate';
@@ -1136,14 +1188,14 @@ async function proposeImprovement(
     audit(actor, 'experience_propose', 'experience', exp.id, {
       oldVersion: previousActive,
       newVersion: proposedVersion,
-      reason: truncate(reason, 300),
+      reason: truncate(reason + (revisedRecordFields.length > 0 ? ` [record-level fields revised, originals preserved on v${proposedVersion}: ${revisedRecordFields.join(', ')}]` : ''), 300),
     });
     dirty.experiences = true;
     dirty.meta = true;
     const w = await persistDirty(actor);
     journal(source, actor, 'knowledge:propose', w.ok,
       w.ok
-        ? `Improvement proposal for ${exp.id} stored as version ${proposedVersion} (supersedes v${previousActive}). The active version stays v${exp.activeVersion} until the proposal passes verification.`
+        ? `Improvement proposal for ${exp.id} stored as version ${proposedVersion} (supersedes v${previousActive}).${revisedRecordFields.length > 0 ? ` Record-level field(s) corrected with originals preserved on v${proposedVersion}: ${revisedRecordFields.join(', ')}.` : ''} The active version stays v${exp.activeVersion} until the proposal passes verification.`
         : `Proposal for ${exp.id} NOT saved: ${w.error}`,
       { id: exp.id, proposedVersion, activeVersion: exp.activeVersion, saved: w.ok });
     deps?.broadcastState();
@@ -1295,7 +1347,7 @@ function stateForWeb() {
 }
 
 /* ------------------------------------------------------------------ */
-/* Init                                                                */
+/* Init — hot-reload probe comment */
 /* ------------------------------------------------------------------ */
 
 export interface KnowledgeApi {

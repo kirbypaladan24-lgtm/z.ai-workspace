@@ -1,0 +1,54 @@
+{
+ "runId": "VRUN-000006",
+ "experiments": "Two bridge cases staged in the run sandbox (V1a real-workspace chain, V3 Bun lockfile docs), plus two sandbox supplements per the record's plan (V1b installed-tree chain, V2 tsc-vs-grep controls \u2014 outputs preserved at scripts/verifications/exp011/).",
+ "cases": [
+  {
+   "name": "V1a three-layer chain on the real workspace (manifest -> lockfile -> installed/absent)",
+   "objective": "verify the record's core method on the user's actual project files: manifest ranges, lockfile exact pins, layer drift, fabricated-dependency negative control, and honest layer-3 observation",
+   "category": "integration",
+   "command": "python3 knowledge/verification/sandbox/VRUN-000006/v1a_chain.py",
+   "timeoutMs": 60000,
+   "expected": {
+    "expectedResult": "V1A-CHAIN-VERIFIED with the drift printed and the fabricated package caught",
+    "successCriteria": "exit 0, manifest range found, exact lockfile pin found, drift shown, fabricated in neither layer, layer 3 verified or absence recorded",
+    "failureCriteria": "chain broken or fabricated package slips through"
+   },
+   "criteria": {
+    "exitCode": 0,
+    "outputContains": [
+     "V1A-CHAIN-VERIFIED"
+    ],
+    "outputNotContains": []
+   },
+   "flags": {
+    "critical": true,
+    "requiresNetwork": false,
+    "destructive": false
+   }
+  },
+  {
+   "name": "V3 doc-based: Bun lockfile semantics (live fetch)",
+   "objective": "verify against the ACTUAL official Bun documentation: the lockfile is created by bun install, is text-based, is distinct from node_modules (--lockfile-only), and should be committed to git",
+   "category": "validation",
+   "command": "bash knowledge/verification/sandbox/VRUN-000006/v3_bun_docs.sh",
+   "timeoutMs": 90000,
+   "expected": {
+    "expectedResult": "V3-DOC-VERIFIED with quotes",
+    "successCriteria": "exit 0, all four documented statements found",
+    "failureCriteria": "doc fetch fails or documented statements differ"
+   },
+   "criteria": {
+    "exitCode": 0,
+    "outputContains": [
+     "V3-DOC-VERIFIED"
+    ],
+    "outputNotContains": []
+   },
+   "flags": {
+    "critical": true,
+    "requiresNetwork": true,
+    "destructive": false
+   }
+  }
+ ]
+}

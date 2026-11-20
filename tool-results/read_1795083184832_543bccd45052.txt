@@ -1,0 +1,2002 @@
+     1→/**
+     2→ * verification.ts — the Workspace Bridge SCIENTIFIC VERIFICATION ENGINE (v1).
+     3→ *
+     4→ * Extends the knowledge layer (knowledge.ts) with an evidence-driven
+     5→ * verification lifecycle. Core principle (spec §1):
+     6→ *
+     7→ *   AI-generated reasoning is not experimental evidence. GLM designs the
+     8→ *   experiments and interprets results — the BRIDGE executes the tests,
+     9→ *   records the real outputs/exit codes/durations, evaluates PASS/FAIL
+    10→ *   against the declared criteria, computes the statistics, and decides
+    11→ *   whether the evidence supports the proposed conclusion.
+    12→ *
+    13→ * Verification states (spec §3) — independent of knowledge approval:
+    14→ *   PENDING → PLANNING → READY → TESTING → ANALYZING →
+    15→ *   VERIFIED | PARTIALLY_VERIFIED | FAILED | BLOCKED
+    16→ *
+    17→ * A run never changes a knowledge record's approval status. Tests passing
+    18→ * does NOT approve knowledge — the owner stays in control (spec §3, §6F).
+    19→ *
+    20→ * Store files (workspace-relative, git-versioned, portable):
+    21→ *   knowledge/verification/runs.jsonl       one run per line (steps, rounds,
+    22→ *                                           analyses, conclusion, feedback)
+    23→ *   knowledge/verification/cases.jsonl      test cases (the plan)
+    24→ *   knowledge/verification/attempts.jsonl   every real execution attempt
+    25→ *   knowledge/verification/metrics.jsonl    measured/reported metrics
+    26→ *   knowledge/verification/evidence.jsonl   evidence artifacts (+ files in
+    27→ *                                           knowledge/verification/evidence/)
+    28→ *   knowledge/verification/meta.json        schema version + ID counters
+    29→ *   knowledge/verification/README.md        self-documentation
+    30→ *
+    31→ * Security (spec §9): commands run on the user's machine through the VS Code
+    32→ * extension (the existing trust model of the bridge). Enforced here: per-test
+    33→ * timeouts, a run time budget, secret redaction before persistence, owner
+    34→ * confirmation for tests flagged network/destructive, cancellation between
+    35→ * tests, and BLOCKED (never silent execution) for requirements we cannot
+    36→ * enforce. CPU/memory isolation is NOT enforceable through this transport —
+    37→ * documented honestly instead of pretended.
+    38→ */
+    39→
+    40→import { readFileSync, writeFileSync, mkdirSync } from 'fs';
+    41→import { join } from 'path';
+    42→import { createHash } from 'crypto';
+    43→
+    44→/* ------------------------------------------------------------------ */
+    45→/* Types                                                               */
+    46→/* ------------------------------------------------------------------ */
+    47→
+    48→export type VRunStatus =
+    49→  | 'PENDING'
+    50→  | 'PLANNING'
+    51→  | 'READY'
+    52→  | 'TESTING'
+    53→  | 'ANALYZING'
+    54→  | 'PARTIALLY_VERIFIED'
+    55→  | 'VERIFIED'
+    56→  | 'FAILED'
+    57→  | 'BLOCKED';
+    58→
+    59→export type VConclusionStatus = 'VERIFIED' | 'PARTIALLY_VERIFIED' | 'FAILED' | 'BLOCKED';
+    60→export type VStepStatus = 'pending' | 'running' | 'complete' | 'failed' | 'skipped';
+    61→export type VCaseStatus = 'NOT_EXECUTED' | 'PASS' | 'FAIL' | 'ERROR' | 'SKIPPED' | 'BLOCKED';
+    62→export type VAttemptStatus = 'PASS' | 'FAIL' | 'ERROR' | 'BLOCKED';
+    63→export type VCaseCategory =
+    64→  | 'unit' | 'integration' | 'functional' | 'regression' | 'boundary'
+    65→  | 'negative' | 'edge-case' | 'performance' | 'validation' | 'other';
+    66→export type VSource = 'operator' | 'web' | 'system';
+    67→
+    68→export interface VStep {
+    69→  n: number;
+    70→  name: string;
+    71→  status: VStepStatus;
+    72→  startedAt: number | null;
+    73→  completedAt: number | null;
+    74→  durationMs: number | null;
+    75→  details: string;
+    76→}
+    77→
+    78→export interface VRound {
+    79→  n: number;
+    80→  kind: 'initial' | 'regression';
+    81→  hypothesis: string;
+    82→  expectedObservation: string;
+    83→  changeNote: string;
+    84→  createdAt: string;
+    85→  outcome: string;
+    86→}
+    87→
+    88→export interface VStats {
+    89→  planned: number;
+    90→  generated: number;
+    91→  executed: number;
+    92→  passed: number;
+    93→  failed: number;
+    94→  skipped: number;
+    95→  blocked: number;
+    96→  errors: number;
+    97→  attempts: number;
+    98→  iterations: number;
+    99→  /** Passed / (Passed + Failed) * 100 — null when nothing executed (N/A). */
+   100→  passRate: number | null;
+   101→}
+   102→
+   103→export interface VAnalysis {
+   104→  id: string;
+   105→  round: number;
+   106→  submittedBy: string;
+   107→  createdAt: string;
+   108→  summary: string;
+   109→  comparison: string;
+   110→  alternativeExplanations: string;
+   111→  recommendedModifications: string;
+   112→  proposedConclusion: { status: VConclusionStatus; summary: string };
+   113→  engineDecision: { accepted: boolean; effectiveStatus: VConclusionStatus; reason: string };
+   114→  metricIds: string[];
+   115→}
+   116→
+   117→export interface VConclusion {
+   118→  status: VConclusionStatus;
+   119→  summary: string;
+   120→  glmInterpretation: string;
+   121→  stats: VStats;
+   122→  decidedAt: string;
+   123→  decidedBy: string;
+   124→}
+   125→
+   126→export interface VProblem {
+   127→  description: string;
+   128→  symptoms: string;
+   129→  expectedBehavior: string;
+   130→  actualBehavior: string;
+   131→  facts: string;
+   132→  assumptions: string;
+   133→  environment: string;
+   134→  constraints: string;
+   135→}
+   136→
+   137→export interface VHypothesis {
+   138→  text: string;
+   139→  expectedObservation: string;
+   140→  supportingEvidence: string;
+   141→  contradictingEvidence: string;
+   142→}
+   143→
+   144→export interface VFeedback {
+   145→  id: string;
+   146→  decision: 'accept' | 'reject' | 'comment';
+   147→  comment: string;
+   148→  actor: string;
+   149→  createdAt: string;
+   150→}
+   151→
+   152→export interface VEnvironmentSnapshot {
+   153→  capturedAt: number;
+   154→  os: string;
+   155→  runtimes: string;
+   156→  sourceRevision: string | null;
+   157→  journalRefs: string[];
+   158→}
+   159→
+   160→export interface VRun {
+   161→  id: string;
+   162→  knowledgeId: string;
+   163→  knowledgeVersion: number;
+   164→  title: string;
+   165→  problem: VProblem;
+   166→  hypothesis: VHypothesis;
+   167→  strategy: string;
+   168→  status: VRunStatus;
+   169→  currentStage: number;
+   170→  steps: VStep[];
+   171→  rounds: VRound[];
+   172→  analyses: VAnalysis[];
+   173→  environmentSnapshot: VEnvironmentSnapshot | null;
+   174→  stats: VStats;
+   175→  conclusion: VConclusion | null;
+   176→  cancelled: boolean;
+   177→  cancelReason: string;
+   178→  timeBudgetMs: number;
+   179→  elapsedMs: number;
+   180→  needsDangerousConfirm: boolean;
+   181→  startedAt: string | null;
+   182→  completedAt: string | null;
+   183→  durationMs: number | null;
+   184→  reportEvidenceId: string | null;
+   185→  createdBy: string;
+   186→  createdAt: string;
+   187→  updatedAt: string;
+   188→  feedback: VFeedback[];
+   189→}
+   190→
+   191→export interface VCriteria {
+   192→  exitCode: number;
+   193→  outputContains: string[];
+   194→  outputNotContains: string[];
+   195→}
+   196→
+   197→export interface VTestCase {
+   198→  id: string;
+   199→  runId: string;
+   200→  round: number;
+   201→  name: string;
+   202→  objective: string;
+   203→  category: VCaseCategory;
+   204→  command: string;
+   205→  timeoutMs: number;
+   206→  expected: { expectedResult: string; successCriteria: string; failureCriteria: string };
+   207→  criteria: VCriteria;
+   208→  flags: { critical: boolean; requiresNetwork: boolean; destructive: boolean };
+   209→  status: VCaseStatus;
+   210→  latestAttemptId: string | null;
+   211→  createdAt: string;
+   212→}
+   213→
+   214→export interface VAttempt {
+   215→  id: string;
+   216→  testCaseId: string;
+   217→  runId: string;
+   218→  round: number;
+   219→  attemptNumber: number;
+   220→  status: VAttemptStatus;
+   221→  command: string;
+   222→  exitCode: number | null;
+   223→  timedOut: boolean;
+   224→  output: string;
+   225→  durationMs: number;
+   226→  startedAt: string;
+   227→  completedAt: string;
+   228→  journalRef: string | null;
+   229→  evaluatedBy: string;
+   230→  note: string;
+   231→}
+   232→
+   233→export interface VMetric {
+   234→  id: string;
+   235→  runId: string;
+   236→  testCaseId: string | null;
+   237→  name: string;
+   238→  value: string;
+   239→  unit: string;
+   240→  source: 'measured' | 'reported';
+   241→  verified: boolean;
+   242→  recordedAt: string;
+   243→}
+   244→
+   245→export interface VEvidence {
+   246→  id: string;
+   247→  runId: string;
+   248→  testCaseId: string | null;
+   249→  type: 'report' | 'log' | 'dataset' | 'config' | 'screenshot' | 'other';
+   250→  filename: string;
+   251→  storageRef: string;
+   252→  sha256: string;
+   253→  bytes: number;
+   254→  createdAt: string;
+   255→  createdBy: string;
+   256→}
+   257→
+   258→/* Run payload sent to the dashboard */
+   259→export interface VRunForWeb {
+   260→  id: string;
+   261→  knowledgeId: string;
+   262→  knowledgeVersion: number;
+   263→  title: string;
+   264→  status: VRunStatus;
+   265→  currentStage: number;
+   266→  stageName: string;
+   267→  hypothesis: string;
+   268→  stats: VStats;
+   269→  needsDangerousConfirm: boolean;
+   270→  cancelled: boolean;
+   271→  startedAt: string | null;
+   272→  completedAt: string | null;
+   273→  updatedAt: string;
+   274→  createdBy: string;
+   275→  conclusion: VConclusion | null;
+   276→}
+   277→
+   278→export interface VRunDetail {
+   279→  run: VRun;
+   280→  cases: VTestCase[];
+   281→  attempts: VAttempt[];
+   282→  metrics: VMetric[];
+   283→  evidence: VEvidence[];
+   284→}
+   285→
+   286→export interface VCounts {
+   287→  total: number;
+   288→  byStatus: Record<VRunStatus, number>;
+   289→  cases: number;
+   290→  attempts: number;
+   291→  evidence: number;
+   292→}
+   293→
+   294→export interface VStateForWeb {
+   295→  ok: boolean;
+   296→  online: boolean;
+   297→  syncedAt: number | null;
+   298→  note?: string;
+   299→  counts: VCounts;
+   300→  runs: VRunForWeb[];
+   301→}
+   302→
+   303→/* ------------------------------------------------------------------ */
+   304→/* Inputs (from the admin API / dashboard / CLI)                       */
+   305→/* ------------------------------------------------------------------ */
+   306→
+   307→export interface CreateRunInput {
+   308→  knowledgeId: string;
+   309→  knowledgeVersion?: number;
+   310→  title?: string;
+   311→  problem?: Partial<VProblem>;
+   312→  hypothesis?: Partial<VHypothesis>;
+   313→  strategy?: string;
+   314→}
+   315→
+   316→export interface CaseInput {
+   317→  name: string;
+   318→  objective?: string;
+   319→  category?: string;
+   320→  command: string;
+   321→  timeoutMs?: number;
+   322→  expected?: Partial<VTestCase['expected']>;
+   323→  criteria?: Partial<VCriteria>;
+   324→  flags?: Partial<VTestCase['flags']>;
+   325→}
+   326→
+   327→export interface PlanInput {
+   328→  runId: string;
+   329→  experiments?: string;
+   330→  cases: CaseInput[];
+   331→}
+   332→
+   333→export interface AnalysisInput {
+   334→  runId: string;
+   335→  summary?: string;
+   336→  comparison?: string;
+   337→  alternativeExplanations?: string;
+   338→  recommendedModifications?: string;
+   339→  proposedConclusion?: { status?: string; summary?: string };
+   340→  metrics?: Array<{ name: string; value: string | number; unit?: string; testCaseId?: string }>;
+   341→}
+   342→
+   343→export interface CaseUpdateInput {
+   344→  id: string;
+   345→  name?: string;
+   346→  objective?: string;
+   347→  command?: string;
+   348→  timeoutMs?: number;
+   349→  expected?: Partial<VTestCase['expected']>;
+   350→  criteria?: Partial<VCriteria>;
+   351→  reason?: string;
+   352→}
+   353→
+   354→export interface RegressInput {
+   355→  runId: string;
+   356→  hypothesis?: string;
+   357→  expectedObservation?: string;
+   358→  changeNote?: string;
+   359→  /** Case IDs to RE-EXECUTE this round (attempts preserved as history, spec §11). */
+   360→  retry?: string[];
+   361→  /** Case DEFINITION revisions (criteria/command corrections from failure investigation). */
+   362→  updates?: CaseUpdateInput[];
+   363→  cases: CaseInput[];
+   364→}
+   365→
+   366→/* ------------------------------------------------------------------ */
+   367→/* Constants                                                           */
+   368→/* ------------------------------------------------------------------ */
+   369→
+   370→const STORE_DIR = 'knowledge/verification';
+   371→const FILES = {
+   372→  runs: `${STORE_DIR}/runs.jsonl`,
+   373→  cases: `${STORE_DIR}/cases.jsonl`,
+   374→  attempts: `${STORE_DIR}/attempts.jsonl`,
+   375→  metrics: `${STORE_DIR}/metrics.jsonl`,
+   376→  evidence: `${STORE_DIR}/evidence.jsonl`,
+   377→  meta: `${STORE_DIR}/meta.json`,
+   378→  readme: `${STORE_DIR}/README.md`,
+   379→} as const;
+   380→
+   381→export function verificationSandboxDir(runId: string): string {
+   382→  return `${STORE_DIR}/sandbox/${runId}`;
+   383→}
+   384→export function verificationEvidenceDir(runId: string): string {
+   385→  return `${STORE_DIR}/evidence/${runId}`;
+   386→}
+   387→
+   388→const SCHEMA_VERSION = 1;
+   389→const STAGES = [
+   390→  'Problem Analysis',
+   391→  'Hypothesis Formulation',
+   392→  'Experiment Design',
+   393→  'Test Plan Generation',
+   394→  'Environment Preparation',
+   395→  'Test Execution',
+   396→  'Result Analysis',
+   397→  'Regression Testing',
+   398→  'Final Verification',
+   399→  'Report Generation',
+   400→] as const;
+   401→const CASE_CATEGORIES: readonly string[] = [
+   402→  'unit', 'integration', 'functional', 'regression', 'boundary',
+   403→  'negative', 'edge-case', 'performance', 'validation', 'other',
+   404→];
+   405→const MAX_SYNC_READ_CHARS = 1_400_000;
+   406→const MAX_ATTEMPT_OUTPUT_CHARS = 20_000;
+   407→const DEFAULT_TEST_TIMEOUT_MS = 60_000;
+   408→const MAX_TEST_TIMEOUT_MS = 150_000;
+   409→const DEFAULT_RUN_BUDGET_MS = 15 * 60_000;
+   410→const MAX_METRICS_PER_ANALYSIS = 60;
+   411→
+   412→/* Command patterns the engine refuses to execute at all (spec §9). */
+   413→const COMMAND_BLOCK_PATTERNS: RegExp[] = [
+   414→  /\brm\s+(-[a-zA-Z]*\s+)*\/(\s|$)/,        // rm -rf / — filesystem root
+   415→  /\bmkfs\b/,                                 // filesystem formatting
+   416→  /\bdd\s+[^|]*of=\/dev\/(sd|nvme|hd)/i,      // raw device writes
+   417→  /\bshutdown\b|\breboot\b/,                  // power actions
+   418→  /:\(\)\s*\{\s*:\|\:&\s*\}\s*;:/,            // fork bomb
+   419→  /\bcurl\b[^|]*\|\s*(ba)?sh\b/,              // curl | sh remote code exec
+   420→  />\s*\/dev\/(sd|nvme|hd)/i,                 // redirect to raw device
+   421→];
+   422→
+   423→/* High-confidence secrets — redacted from stored output before persist. */
+   424→const SECRET_REDACTIONS: RegExp[] = [
+   425→  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
+   426→  /\b(?:sk|rk)-[A-Za-z0-9_-]{20,}\b/g,
+   427→  /\bAKIA[0-9A-Z]{16}\b/g,
+   428→  /\bghp_[A-Za-z0-9]{30,}\b/g,
+   429→  /\bgho_[A-Za-z0-9]{30,}\b/g,
+   430→  /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g,
+   431→  /\beyJ[A-Za-z0-9_-]{20,}\.eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\b/g,
+   432→];
+   433→const SECRET_ASSIGN_RE = /\b(password|passwd|secret|api[_-]?key|access[_-]?token)\b(\s*[:=]\s*)\S+/gi;
+   434→
+   435→/* ------------------------------------------------------------------ */
+   436→/* Module state                                                        */
+   437→/* ------------------------------------------------------------------ */
+   438→
+   439→interface StoreState {
+   440→  runs: VRun[];
+   441→  cases: VTestCase[];
+   442→  attempts: VAttempt[];
+   443→  metrics: VMetric[];
+   444→  evidence: VEvidence[];
+   445→  meta: { schemaVersion: number; counters: { vrun: number; vtc: number; vta: number; vmet: number; vev: number; vfb: number } };
+   446→  syncedAt: number | null;
+   447→  online: boolean;
+   448→  note?: string;
+   449→}
+   450→
+   451→function emptyStore(): StoreState {
+   452→  return {
+   453→    runs: [],
+   454→    cases: [],
+   455→    attempts: [],
+   456→    metrics: [],
+   457→    evidence: [],
+   458→    meta: { schemaVersion: SCHEMA_VERSION, counters: { vrun: 0, vtc: 0, vta: 0, vmet: 0, vev: 0, vfb: 0 } },
+   459→    syncedAt: null,
+   460→    online: false,
+   461→  };
+   462→}
+   463→
+   464→let store: StoreState = emptyStore();
+   465→let deps: VerificationDeps | null = null;
+   466→let cacheFile = '';
+   467→let syncPromise: Promise<StoreState> | null = null;
+   468→let mutationChain: Promise<unknown> = Promise.resolve();
+   469→const activeExecutions = new Set<string>(); // runIds with a live execute loop
+   470→
+   471→/* ------------------------------------------------------------------ */
+   472→/* Dependencies injected by index.ts                                   */
+   473→/* ------------------------------------------------------------------ */
+   474→
+   475→export interface VerificationDeps {
+   476→  isOnline(): boolean;
+   477→  projectName(): string | null;
+   478→  /**
+   479→   * Execute ONE command on the user's machine through the journaled tool
+   480→   * path. MUST return the real exit code captured by the extension, the
+   481→   * full output, the duration and the activity-journal reference.
+   482→   */
+   483→  runTest(
+   484→    command: string,
+   485→    timeoutMs?: number,
+   486→    ctx?: { source?: VSource; actor?: string },
+   487→  ): Promise<{
+   488→    ok: boolean;
+   489→    exitCode: number | null;
+   490→    timedOut: boolean;
+   491→    output: string;
+   492→    durationMs: number;
+   493→    journalRef?: string;
+   494→  }>;
+   495→  /** Write one verification activity entry to the journal. */
+   496→  logVerification(e: {
+   497→    source: VSource;
+   498→    actor: string;
+   499→    tool: string;
+   500→    ok: boolean;
+   501→    result: string;
+   502→    meta?: Record<string, unknown>;
+   503→  }): void;
+   504→  /** Push verification:state to paired web clients. */
+   505→  broadcastState(): void;
+   506→  /** Push a full run detail to paired web clients (live updates). */
+   507→  broadcastRun(detail: VRunDetail): void;
+   508→  dataDir: string;
+   509→  /** raw extension tool exec used for store-file sync (not journaled) */
+   510→  rawExec: typeof rawExec;
+   511→}
+   512→
+   513→let rawExec: (name: 'read_file' | 'write_file' | 'list_files', args: Record<string, unknown>) => Promise<{ ok: boolean; result: string; content?: string }> =
+   514→  async () => ({ ok: false, result: 'verification module not initialized' });
+   515→
+   516→/* ------------------------------------------------------------------ */
+   517→/* Small helpers                                                       */
+   518→/* ------------------------------------------------------------------ */
+   519→
+   520→function truncate(s: unknown, max: number): string {
+   521→  const v = String(s ?? '');
+   522→  return v.length <= max ? v : v.slice(0, max) + `… (${v.length} chars)`;
+   523→}
+   524→
+   525→function nowIso(): string {
+   526→  return new Date().toISOString();
+   527→}
+   528→
+   529→function nextId(kind: 'vrun' | 'vtc' | 'vta' | 'vmet' | 'vev' | 'vfb'): string {
+   530→  const prefix = kind === 'vrun' ? 'VRUN' : kind === 'vtc' ? 'VTC' : kind === 'vta' ? 'VTA'
+   531→    : kind === 'vmet' ? 'VMET' : kind === 'vev' ? 'VEVA' : 'VFBK';
+   532→  const n = ++store.meta.counters[kind];
+   533→  return `${prefix}-${String(n).padStart(6, '0')}`;
+   534→}
+   535→
+   536→function findRun(id: string): VRun | undefined {
+   537→  return store.runs.find((r) => r.id === id);
+   538→}
+   539→
+   540→function runCases(runId: string): VTestCase[] {
+   541→  return store.cases.filter((c) => c.runId === runId);
+   542→}
+   543→
+   544→function caseAttempts(testCaseId: string): VAttempt[] {
+   545→  return store.attempts.filter((a) => a.testCaseId === testCaseId);
+   546→}
+   547→
+   548→function freshSteps(): VStep[] {
+   549→  return STAGES.map((name, i) => ({
+   550→    n: i + 1,
+   551→    name,
+   552→    status: 'pending' as VStepStatus,
+   553→    startedAt: null,
+   554→    completedAt: null,
+   555→    durationMs: null,
+   556→    details: '',
+   557→  }));
+   558→}
+   559→
+   560→function emptyStats(): VStats {
+   561→  return {
+   562→    planned: 0, generated: 0, executed: 0, passed: 0, failed: 0,
+   563→    skipped: 0, blocked: 0, errors: 0, attempts: 0, iterations: 0, passRate: null,
+   564→  };
+   565→}
+   566→
+   567→function enqueue<T>(fn: () => Promise<T>): Promise<T> {
+   568→  const run = mutationChain.then(fn, fn);
+   569→  mutationChain = run.catch(() => undefined);
+   570→  return run;
+   571→}
+   572→
+   573→function journal(
+   574→  source: VSource,
+   575→  actor: string,
+   576→  tool: string,
+   577→  ok: boolean,
+   578→  result: string,
+   579→  meta?: Record<string, unknown>,
+   580→) {
+   581→  deps?.logVerification({ source, actor, tool, ok, result: truncate(result, 1000), meta });
+   582→}
+   583→
+   584→/** Redact secrets from captured output BEFORE anything is persisted. */
+   585→function redact(text: string): string {
+   586→  let out = String(text ?? '');
+   587→  for (const re of SECRET_REDACTIONS) out = out.replace(re, '[REDACTED:secret]');
+   588→  out = out.replace(SECRET_ASSIGN_RE, '$1$2[REDACTED]');
+   589→  return out;
+   590→}
+   591→
+   592→function sha256(text: string): string {
+   593→  return createHash('sha256').update(text, 'utf8').digest('hex');
+   594→}
+   595→
+   596→/* ------------------------------------------------------------------ */
+   597→/* Local cache + workspace file I/O (mirrors knowledge.ts)             */
+   598→/* ------------------------------------------------------------------ */
+   599→
+   600→function persistLocalCache() {
+   601→  if (!cacheFile) return;
+   602→  try {
+   603→    mkdirSync(deps!.dataDir, { recursive: true });
+   604→    writeFileSync(cacheFile, JSON.stringify(store));
+   605→  } catch (e) {
+   606→    console.error('[verification] local cache save failed:', e);
+   607→  }
+   608→}
+   609→
+   610→function loadLocalCache() {
+   611→  try {
+   612→    const raw = JSON.parse(readFileSync(cacheFile, 'utf8')) as StoreState;
+   613→    if (raw && Array.isArray(raw.runs) && raw.meta) {
+   614→      store = {
+   615→        runs: raw.runs,
+   616→        cases: Array.isArray(raw.cases) ? raw.cases : [],
+   617→        attempts: Array.isArray(raw.attempts) ? raw.attempts : [],
+   618→        metrics: Array.isArray(raw.metrics) ? raw.metrics : [],
+   619→        evidence: Array.isArray(raw.evidence) ? raw.evidence : [],
+   620→        meta: raw.meta,
+   621→        syncedAt: raw.syncedAt ?? null,
+   622→        online: false,
+   623→        note: 'loaded from local cache — re-syncs when the workspace connects',
+   624→      };
+   625→    }
+   626→  } catch {
+   627→    /* no cache yet — fresh start */
+   628→  }
+   629→}
+   630→
+   631→async function wsReadFile(path: string): Promise<{ ok: boolean; text: string; missing: boolean }> {
+   632→  const r = await rawExec('read_file', { path });
+   633→  if (r.ok) {
+   634→    let text = typeof (r as any).content === 'string' ? (r as any).content : String(r.result ?? '');
+   635→    if (!(r as any).content && text.startsWith(path)) {
+   636→      const idx = text.indexOf('):\n\n');
+   637→      if (idx > 0) text = text.slice(idx + 4);
+   638→    }
+   639→    if (text.length > MAX_SYNC_READ_CHARS) {
+   640→      return { ok: false, text: '', missing: false };
+   641→    }
+   642→    return { ok: true, text, missing: false };
+   643→  }
+   644→  const msg = String(r.result ?? '');
+   645→  return { ok: false, text: '', missing: /not (exist|found)|no such/i.test(msg) };
+   646→}
+   647→
+   648→async function wsWriteFile(path: string, content: string): Promise<boolean> {
+   649→  const r = await rawExec('write_file', { path, content });
+   650→  return r.ok;
+   651→}
+   652→
+   653→function parseJsonl<T>(text: string): { items: T[]; badLines: number } {
+   654→  const items: T[] = [];
+   655→  let badLines = 0;
+   656→  for (const line of String(text ?? '').split('\n')) {
+   657→    const l = line.trim();
+   658→    if (!l) continue;
+   659→    try {
+   660→      items.push(JSON.parse(l) as T);
+   661→    } catch {
+   662→      badLines++;
+   663→    }
+   664→  }
+   665→  return { items, badLines };
+   666→}
+   667→
+   668→function toJsonl(items: unknown[]): string {
+   669→  return items.map((i) => JSON.stringify(i)).join('\n') + (items.length ? '\n' : '');
+   670→}
+   671→
+   672→const dirty = { runs: false, cases: false, attempts: false, metrics: false, evidence: false, meta: false };
+   673→
+   674→function markAllDirty() {
+   675→  dirty.runs = dirty.cases = dirty.attempts = dirty.metrics = dirty.evidence = dirty.meta = true;
+   676→}
+   677→
+   678→async function persistDirty(): Promise<{ ok: boolean; error?: string }> {
+   679→  /* No isOnline gate (see knowledge.ts): real write results are the truth. */
+   680→  if (!deps) {
+   681→    return { ok: false, error: 'module not initialized' };
+   682→  }
+   683→  const writes: Array<Promise<boolean>> = [];
+   684→  if (dirty.runs) writes.push(wsWriteFile(FILES.runs, toJsonl(store.runs)));
+   685→  if (dirty.cases) writes.push(wsWriteFile(FILES.cases, toJsonl(store.cases)));
+   686→  if (dirty.attempts) writes.push(wsWriteFile(FILES.attempts, toJsonl(store.attempts)));
+   687→  if (dirty.metrics) writes.push(wsWriteFile(FILES.metrics, toJsonl(store.metrics)));
+   688→  if (dirty.evidence) writes.push(wsWriteFile(FILES.evidence, toJsonl(store.evidence)));
+   689→  if (dirty.meta) writes.push(wsWriteFile(FILES.meta, JSON.stringify(store.meta, null, 2)));
+   690→  const results = await Promise.all(writes);
+   691→  dirty.runs = dirty.cases = dirty.attempts = dirty.metrics = dirty.evidence = dirty.meta = false;
+   692→  persistLocalCache();
+   693→  if (results.some((ok) => !ok)) {
+   694→    return { ok: false, error: 'writing the verification store to the workspace failed — retry the operation' };
+   695→  }
+   696→  return { ok: true };
+   697→}
+   698→
+   699→/* ------------------------------------------------------------------ */
+   700→/* Stats + evaluation — computed BY THE BRIDGE, never by GLM (spec §8) */
+   701→/* ------------------------------------------------------------------ */
+   702→
+   703→export function computeStats(runId: string): VStats {
+   704→  const cases = runCases(runId);
+   705→  const s = emptyStats();
+   706→  s.planned = cases.length;
+   707→  s.generated = cases.length;
+   708→  s.attempts = store.attempts.filter((a) => a.runId === runId).length;
+   709→  const run = findRun(runId);
+   710→  s.iterations = run ? run.rounds.length : 0;
+   711→  for (const c of cases) {
+   712→    switch (c.status) {
+   713→      case 'PASS': s.passed++; s.executed++; break;
+   714→      case 'FAIL': s.failed++; s.executed++; break;
+   715→      case 'ERROR': s.errors++; s.executed++; break;
+   716→      case 'SKIPPED': s.skipped++; break;
+   717→      case 'BLOCKED': s.blocked++; break;
+   718→      default: break; // NOT_EXECUTED
+   719→    }
+   720→  }
+   721→  const denom = s.passed + s.failed;
+   722→  s.passRate = denom > 0 ? Math.round((s.passed / denom) * 1000) / 10 : null;
+   723→  return s;
+   724→}
+   725→
+   726→/**
+   727→ * The bridge-side evaluator. Applies the DECLARED criteria to the REAL
+   728→ * execution result. GLM never assigns PASS/FAIL itself.
+   729→ */
+   730→function evaluateAttempt(
+   731→  criteria: VCriteria,
+   732→  r: { exitCode: number | null; timedOut: boolean; output: string },
+   733→): { status: VAttemptStatus; note: string } {
+   734→  if (r.timedOut) return { status: 'ERROR', note: 'timed out — infrastructure error, not a criteria result' };
+   735→  if (r.exitCode === null) return { status: 'ERROR', note: 'no exit code captured — infrastructure error' };
+   736→  if (r.exitCode !== criteria.exitCode) {
+   737→    return { status: 'FAIL', note: `exit code ${r.exitCode} ≠ expected ${criteria.exitCode}` };
+   738→  }
+   739→  const out = redact(r.output);
+   740→  for (const needle of criteria.outputContains) {
+   741→    if (!out.includes(needle)) return { status: 'FAIL', note: `output does not contain "${truncate(needle, 120)}"` };
+   742→  }
+   743→  for (const banned of criteria.outputNotContains) {
+   744→    if (out.includes(banned)) return { status: 'FAIL', note: `output contains forbidden "${truncate(banned, 120)}"` };
+   745→  }
+   746→  return { status: 'PASS', note: `exit ${r.exitCode} + ${criteria.outputContains.length} output assertion(s) satisfied` };
+   747→}
+   748→
+   749→/**
+   750→ * The engine decides the effective conclusion from computed stats (spec §6F:
+   751→ * the verification system determines whether evidence satisfies the criteria).
+   752→ * Critical cases = explicitly flagged, or ALL cases when none is flagged.
+   753→ */
+   754→function engineConclusion(runId: string): { status: VConclusionStatus; reason: string } {
+   755→  const cases = runCases(runId);
+   756→  const critical = cases.filter((c) => c.flags.critical);
+   757→  const considered = critical.length > 0 ? critical : cases;
+   758→  if (considered.length === 0) {
+   759→    return { status: 'BLOCKED', reason: 'no test cases defined — nothing to verify against' };
+   760→  }
+   761→  const executed = considered.filter((c) => c.status !== 'NOT_EXECUTED' && c.status !== 'SKIPPED' && c.status !== 'BLOCKED');
+   762→  if (executed.length === 0) {
+   763→    return { status: 'BLOCKED', reason: 'no critical test was actually executed — evidence is missing' };
+   764→  }
+   765→  const passed = considered.filter((c) => c.status === 'PASS');
+   766→  const failed = considered.filter((c) => c.status === 'FAIL' || c.status === 'ERROR');
+   767→  if (passed.length === considered.length) {
+   768→    return { status: 'VERIFIED', reason: `all ${considered.length} critical test(s) passed against real executions` };
+   769→  }
+   770→  if (passed.length > 0) {
+   771→    return {
+   772→      status: 'PARTIALLY_VERIFIED',
+   773→      reason: `${passed.length}/${considered.length} critical tests passed; ${failed.length} failed/errored, the rest incomplete`,
+   774→    };
+   775→  }
+   776→  return { status: 'FAILED', reason: `0/${considered.length} critical tests passed — the hypothesis is not supported by the evidence` };
+   777→}
+   778→
+   779→/* ------------------------------------------------------------------ */
+   780→/* Step helpers                                                        */
+   781→/* ------------------------------------------------------------------ */
+   782→
+   783→function stepStart(run: VRun, n: number, details = '') {
+   784→  const st = run.steps.find((s) => s.n === n);
+   785→  if (!st || st.status === 'complete') return;
+   786→  st.status = 'running';
+   787→  st.startedAt = Date.now();
+   788→  st.details = details || st.details;
+   789→  run.currentStage = n;
+   790→  dirty.runs = true;
+   791→}
+   792→
+   793→function stepComplete(run: VRun, n: number, details = '') {
+   794→  const st = run.steps.find((s) => s.n === n);
+   795→  if (!st) return;
+   796→  if (st.status !== 'running') st.startedAt = st.startedAt ?? Date.now();
+   797→  st.status = 'complete';
+   798→  st.completedAt = Date.now();
+   799→  st.durationMs = st.completedAt - (st.startedAt ?? st.completedAt);
+   800→  if (details) st.details = details;
+   801→  dirty.runs = true;
+   802→}
+   803→
+   804→function stepSkip(run: VRun, n: number, reason: string) {
+   805→  const st = run.steps.find((s) => s.n === n);
+   806→  if (!st || st.status === 'complete') return;
+   807→  st.status = 'skipped';
+   808→  st.details = reason;
+   809→  dirty.runs = true;
+   810→}
+   811→
+   812→function broadcastRunFor(runId: string) {
+   813→  const run = findRun(runId);
+   814→  if (!run || !deps) return;
+   815→  deps.broadcastRun(detailFor(runId));
+   816→  deps.broadcastState();
+   817→}
+   818→
+   819→export function detailFor(runId: string): VRunDetail {
+   820→  const run = findRun(runId);
+   821→  return {
+   822→    run: run ?? ({} as VRun),
+   823→    cases: runCases(runId),
+   824→    attempts: store.attempts.filter((a) => a.runId === runId),
+   825→    metrics: store.metrics.filter((m) => m.runId === runId),
+   826→    evidence: store.evidence.filter((e) => e.runId === runId),
+   827→  };
+   828→}
+   829→
+   830→/* ------------------------------------------------------------------ */
+   831→/* Sync — workspace is the source of truth (mirrors knowledge.ts)      */
+   832→/* ------------------------------------------------------------------ */
+   833→
+   834→const STORE_README = `# Verification Store — Scientific Verification Engine
+   835→
+   836→Evidence records for the Workspace Bridge verification runs. Plain JSONL —
+   837→portable with the repo, git-versioned, human-readable. GLM designs the
+   838→experiments; this store only ever contains results captured by the bridge
+   839→from REAL executions on this machine (exit codes, output, durations).
+   840→
+   841→| File          | Contents                                              |
+   842→|---------------|-------------------------------------------------------|
+   843→| runs.jsonl    | One verification run per line (steps, rounds, analyses, conclusion) |
+   844→| cases.jsonl   | Test cases — the declared plan and criteria           |
+   845→| attempts.jsonl| Every real execution attempt (redacted output)        |
+   846→| metrics.jsonl | Measured/reported metrics, tied to test attempts      |
+   847→| evidence.jsonl| Evidence artifacts (reports live in evidence/<runId>/)|
+   848→| meta.json     | Schema version + ID counters (managed by the bridge)  |
+   849→
+   850→Lifecycle: PENDING → PLANNING → READY → TESTING → ANALYZING →
+   851→VERIFIED | PARTIALLY_VERIFIED | FAILED | BLOCKED. Failed attempts are
+   852→never deleted — every round and every retry is preserved. A verification
+   853→run NEVER approves knowledge by itself; the owner stays in control.
+   854→`;
+   855→
+   856→/** Runs stuck in TESTING when the service died mid-execution. */
+   857→function sweepInterruptedRuns() {
+   858→  let swept = 0;
+   859→  for (const run of store.runs) {
+   860→    if (run.status === 'TESTING' && !activeExecutions.has(run.id)) {
+   861→      run.status = 'BLOCKED';
+   862→      run.cancelReason = 'execution interrupted (service restarted mid-run) — restart verification to continue';
+   863→      stepSkip(run, 6, 'interrupted by service restart');
+   864→      for (const c of runCases(run.id)) {
+   865→        if (c.status === 'NOT_EXECUTED') c.status = 'SKIPPED';
+   866→      }
+   867→      run.stats = computeStats(run.id);
+   868→      run.updatedAt = nowIso();
+   869→      dirty.runs = dirty.cases = true;
+   870→      swept++;
+   871→    }
+   872→  }
+   873→  return swept;
+   874→}
+   875→
+   876→async function syncFromWorkspace(source: VSource, actor: string): Promise<StoreState> {
+   877→  if (syncPromise) return syncPromise;
+   878→  syncPromise = (async () => {
+   879→    /* The WHOLE body runs inside try/finally: an offline early-return that
+   880→     * skips the finally would poison every future sync in this process with
+   881→     * a cached "offline" result (see the same fix in knowledge.ts). */
+   882→    try {
+   883→    /* No isOnline gate: if the workspace is truly offline the meta read below
+   884→     * fails and the honest catch reports it. (A previous gate here poisoned
+   885→     * syncPromise with a cached "offline" result whenever web clients
+   886→     * reconnected faster than the extension after a restart.) */
+   887→    try {
+   888→      const meta = await wsReadFile(FILES.meta);
+   889→      if (meta.missing) {
+   890→        if (store.runs.length > 0) {
+   891→          markAllDirty();
+   892→          const w = await persistDirty();
+   893→          await wsWriteFile(FILES.readme, STORE_README);
+   894→          store.note = w.ok ? 'verification folder was missing — cache re-published to the workspace' : 'verification folder missing and re-publish failed';
+   895→        } else {
+   896→          store.meta.counters = { vrun: 0, vtc: 0, vta: 0, vmet: 0, vev: 0, vfb: 0 };
+   897→          markAllDirty();
+   898→          await persistDirty();
+   899→          await wsWriteFile(FILES.readme, STORE_README);
+   900→          store.note = 'verification folder created in the workspace — empty store seeded';
+   901→        }
+   902→      } else if (meta.ok) {
+   903→        const parsedMeta = JSON.parse(meta.text) as StoreState['meta'];
+   904→        if ((parsedMeta?.schemaVersion ?? 0) > SCHEMA_VERSION) {
+   905→          store.online = true;
+   906→          store.note = `workspace verification store schema v${parsedMeta.schemaVersion} is newer than this bridge (v${SCHEMA_VERSION}) — update the bridge first`;
+   907→          deps?.broadcastState();
+   908→          return store;
+   909→        }
+   910→        const [runs, cases, attempts, metrics, evidence] = await Promise.all([
+   911→          wsReadFile(FILES.runs),
+   912→          wsReadFile(FILES.cases),
+   913→          wsReadFile(FILES.attempts),
+   914→          wsReadFile(FILES.metrics),
+   915→          wsReadFile(FILES.evidence),
+   916→        ]);
+   917→        const failures: string[] = [];
+   918→        store.runs = runs.ok ? parseJsonl<VRun>(runs.text).items : (failures.push('runs'), store.runs);
+   919→        store.cases = cases.ok ? parseJsonl<VTestCase>(cases.text).items : (failures.push('cases'), store.cases);
+   920→        store.attempts = attempts.ok ? parseJsonl<VAttempt>(attempts.text).items : (failures.push('attempts'), store.attempts);
+   921→        store.metrics = metrics.ok ? parseJsonl<VMetric>(metrics.text).items : (failures.push('metrics'), store.metrics);
+   922→        store.evidence = evidence.ok ? parseJsonl<VEvidence>(evidence.text).items : (failures.push('evidence'), store.evidence);
+   923→        store.meta = parsedMeta;
+   924→        store.syncedAt = Date.now();
+   925→        store.online = true;
+   926→        store.note = failures.length > 0
+   927→          ? `some verification files could not be read (${failures.join(', ')}) — cached data kept for those collections`
+   928→          : undefined;
+   929→        // counters never go backwards (protect IDs after hand edits)
+   930→        const bump = (maxId: string, key: 'vrun' | 'vtc' | 'vta' | 'vmet' | 'vev' | 'vfb') => {
+   931→          const n = parseInt(maxId.slice(4), 10);
+   932→          if (Number.isFinite(n) && n > store.meta.counters[key]) store.meta.counters[key] = n;
+   933→        };
+   934→        for (const r of store.runs) bump(r.id, 'vrun');
+   935→        for (const c of store.cases) bump(c.id, 'vtc');
+   936→        for (const a of store.attempts) bump(a.id, 'vta');
+   937→        for (const m of store.metrics) bump(m.id, 'vmet');
+   938→        for (const e of store.evidence) bump(e.id, 'vev');
+   939→        for (const r of store.runs) for (const f of r.feedback) bump(f.id, 'vfb');
+   940→        const swept = sweepInterruptedRuns();
+   941→        if (swept > 0) await persistDirty();
+   942→        persistLocalCache();
+   943→      } else {
+   944→        store.online = true;
+   945→        store.note = `could not read ${FILES.meta}: ${truncate(meta.text, 200)}`;
+   946→      }
+   947→      journal(source, actor, 'verification:sync', true,
+   948→        `Verification store synced — ${store.runs.length} runs, ${store.cases.length} test cases, ${store.attempts.length} attempts, ${store.evidence.length} evidence artifacts.`,
+   949→        { runs: store.runs.length, cases: store.cases.length, attempts: store.attempts.length });
+   950→      deps?.broadcastState();
+   951→      return store;
+   952→    } catch (e: unknown) {
+   953→      store.online = false;
+   954→      store.note = `sync failed: ${e instanceof Error ? e.message : String(e)}`;
+   955→      journal(source, actor, 'verification:sync', false, store.note);
+   956→      deps?.broadcastState();
+   957→      return store;
+   958→    }
+   959→    } finally {
+   960→      syncPromise = null;
+   961→    }
+   962→  })();
+   963→  return syncPromise;
+   964→}
+   965→
+   966→/* ------------------------------------------------------------------ */
+   967→/* Case normalization + validation                                     */
+   968→/* ------------------------------------------------------------------ */
+   969→
+   970→function normalizeCase(
+   971→  input: CaseInput,
+   972→  run: VRun,
+   973→  round: number,
+   974→): { ok: true; tc: VTestCase } | { ok: false; error: string } {
+   975→  const name = String(input?.name ?? '').trim();
+   976→  const command = String(input?.command ?? '').trim();
+   977→  if (!name) return { ok: false, error: 'every test case needs a name' };
+   978→  if (!command) return { ok: false, error: `test case "${name}" needs a command` };
+   979→  if (COMMAND_BLOCK_PATTERNS.some((re) => re.test(command))) {
+   980→    return { ok: false, error: `test case "${name}" was refused: its command matches a forbidden pattern (filesystem-destructive / power / remote-exec)` };
+   981→  }
+   982→  const timeoutMs = Math.max(5_000, Math.min(Number(input?.timeoutMs) > 0 ? Number(input.timeoutMs) : DEFAULT_TEST_TIMEOUT_MS, MAX_TEST_TIMEOUT_MS));
+   983→  const category = (CASE_CATEGORIES.includes(String(input?.category ?? '')) ? String(input.category) : 'other') as VCaseCategory;
+   984→  const crit = input?.criteria ?? {};
+   985→  const flags = input?.flags ?? {};
+   986→  return {
+   987→    ok: true,
+   988→    tc: {
+   989→      id: nextId('vtc'),
+   990→      runId: run.id,
+   991→      round,
+   992→      name: truncate(name, 200),
+   993→      objective: truncate(input?.objective ?? '', 1000),
+   994→      category,
+   995→      command: truncate(command, 2000),
+   996→      timeoutMs,
+   997→      expected: {
+   998→        expectedResult: truncate(input?.expected?.expectedResult ?? '', 1000),
+   999→        successCriteria: truncate(input?.expected?.successCriteria ?? '', 1000),
+  1000→        failureCriteria: truncate(input?.expected?.failureCriteria ?? '', 1000),
+  1001→      },
+  1002→      criteria: {
+  1003→        exitCode: Number.isFinite(crit.exitCode) ? Number(crit.exitCode) : 0,
+  1004→        outputContains: (Array.isArray(crit.outputContains) ? crit.outputContains : []).map((x) => truncate(x, 300)).filter(Boolean),
+  1005→        outputNotContains: (Array.isArray(crit.outputNotContains) ? crit.outputNotContains : []).map((x) => truncate(x, 300)).filter(Boolean),
+  1006→      },
+  1007→      flags: {
+  1008→        critical: flags.critical !== false,
+  1009→        requiresNetwork: !!flags.requiresNetwork,
+  1010→        destructive: !!flags.destructive,
+  1011→      },
+  1012→      status: 'NOT_EXECUTED',
+  1013→      latestAttemptId: null,
+  1014→      createdAt: nowIso(),
+  1015→    },
+  1016→  };
+  1017→}
+  1018→
+  1019→/* ------------------------------------------------------------------ */
+  1020→/* Workflow — PHASE 1/2: create run (observation + hypothesis)         */
+  1021→/* ------------------------------------------------------------------ */
+  1022→
+  1023→async function createRun(
+  1024→  input: CreateRunInput,
+  1025→  source: VSource,
+  1026→  actor: string,
+  1027→): Promise<{ ok: boolean; run?: VRun; error?: string }> {
+  1028→  return enqueue(async () => {
+  1029→    const knowledgeId = String(input?.knowledgeId ?? '').trim();
+  1030→    if (!knowledgeId) return { ok: false, error: 'knowledgeId is required — a verification run always targets a knowledge record' };
+  1031→    if (!deps) {
+  1032→      return { ok: false, error: 'verification module not initialized' };
+  1033→    }
+  1034→    const id = nextId('vrun');
+  1035→    const p = input?.problem ?? {};
+  1036→    const h = input?.hypothesis ?? {};
+  1037→    const rec: VRun = {
+  1038→      id,
+  1039→      knowledgeId,
+  1040→      knowledgeVersion: Number(input?.knowledgeVersion) > 0 ? Number(input.knowledgeVersion) : 0,
+  1041→      title: truncate(input?.title || `Verification of ${knowledgeId}`, 300),
+  1042→      problem: {
+  1043→        description: truncate(p.description ?? '', 4000),
+  1044→        symptoms: truncate(p.symptoms ?? '', 2000),
+  1045→        expectedBehavior: truncate(p.expectedBehavior ?? '', 1000),
+  1046→        actualBehavior: truncate(p.actualBehavior ?? '', 1000),
+  1047→        facts: truncate(p.facts ?? '', 2000),
+  1048→        assumptions: truncate(p.assumptions ?? '', 2000),
+  1049→        environment: truncate(p.environment ?? '', 1000),
+  1050→        constraints: truncate(p.constraints ?? '', 1000),
+  1051→      },
+  1052→      hypothesis: {
+  1053→        text: truncate(h.text ?? '', 4000),
+  1054→        expectedObservation: truncate(h.expectedObservation ?? '', 2000),
+  1055→        supportingEvidence: truncate(h.supportingEvidence ?? '', 2000),
+  1056→        contradictingEvidence: truncate(h.contradictingEvidence ?? '', 2000),
+  1057→      },
+  1058→      strategy: truncate(input?.strategy ?? '', 4000),
+  1059→      status: 'PENDING',
+  1060→      currentStage: 1,
+  1061→      steps: freshSteps(),
+  1062→      rounds: [],
+  1063→      analyses: [],
+  1064→      environmentSnapshot: null,
+  1065→      stats: emptyStats(),
+  1066→      conclusion: null,
+  1067→      cancelled: false,
+  1068→      cancelReason: '',
+  1069→      timeBudgetMs: DEFAULT_RUN_BUDGET_MS,
+  1070→      elapsedMs: 0,
+  1071→      needsDangerousConfirm: false,
+  1072→      startedAt: null,
+  1073→      completedAt: null,
+  1074→      durationMs: null,
+  1075→      reportEvidenceId: null,
+  1076→      createdBy: actor,
+  1077→      createdAt: nowIso(),
+  1078→      updatedAt: nowIso(),
+  1079→      feedback: [],
+  1080→    };
+  1081→    if (!rec.problem.description || !rec.hypothesis.text) {
+  1082→      return { ok: false, error: 'problem.description and hypothesis.text are required — observation and a testable hypothesis come first (scientific workflow §4)' };
+  1083→    }
+  1084→    store.runs.push(rec);
+  1085→
+  1086→    // PHASE 1 + 2 recorded as completed stages with the actual content
+  1087→    stepStart(rec, 1);
+  1088→    stepComplete(rec, 1, 'problem, symptoms, expected vs actual behavior, facts and assumptions recorded');
+  1089→    stepStart(rec, 2);
+  1090→    stepComplete(rec, 2, truncate(rec.hypothesis.text, 300));
+  1091→    rec.rounds.push({
+  1092→      n: 1,
+  1093→      kind: 'initial',
+  1094→      hypothesis: rec.hypothesis.text,
+  1095→      expectedObservation: rec.hypothesis.expectedObservation,
+  1096→      changeNote: 'initial hypothesis',
+  1097→      createdAt: nowIso(),
+  1098→      outcome: '',
+  1099→    });
+  1100→    rec.status = 'PLANNING';
+  1101→    rec.updatedAt = nowIso();
+  1102→    dirty.runs = dirty.meta = true;
+  1103→
+  1104→    // Environment snapshot — REAL commands on the user's machine (spec §12)
+  1105→    stepStart(rec, 5, 'capturing the real execution environment…');
+  1106→    try {
+  1107→      const envCtx = { source, actor };
+  1108→      // strip the "$ <command>" echo lines the extension prepends to output
+  1109→      const clean = (s: string) =>
+  1110→        redact(s).split('\n').filter((l) => !l.trim().startsWith('$')).join('\n').trim();
+  1111→      const osR = await deps.runTest('uname -a 2>/dev/null || ver', 15_000, envCtx);
+  1112→      const rtR = await deps.runTest(
+  1113→        'python3 --version 2>&1; node --version 2>&1; git --version 2>&1; sqlite3 --version 2>&1 | head -1',
+  1114→        20_000,
+  1115→        envCtx,
+  1116→      );
+  1117→      const revR = await deps.runTest('git rev-parse --short HEAD 2>/dev/null || echo no-git', 15_000, envCtx);
+  1118→      const revMatch = clean(revR.output).match(/^[0-9a-f]{7,40}$/m);
+  1119→      rec.environmentSnapshot = {
+  1120→        capturedAt: Date.now(),
+  1121→        os: truncate(clean(osR.output), 500),
+  1122→        runtimes: truncate(clean(rtR.output), 800),
+  1123→        sourceRevision: revMatch ? revMatch[0] : null,
+  1124→        journalRefs: [osR.journalRef, rtR.journalRef, revR.journalRef].filter(Boolean) as string[],
+  1125→      };
+  1126→      stepComplete(rec, 5, 'environment captured from the real machine via journaled commands');
+  1127→    } catch (e) {
+  1128→      stepComplete(rec, 5, `environment capture failed: ${e instanceof Error ? e.message : String(e)} — run may be BLOCKED at start if the workspace is unavailable`);
+  1129→    }
+  1130→
+  1131→    const w = await persistDirty();
+  1132→    journal(source, actor, 'verification:create', w.ok,
+  1133→      w.ok
+  1134→        ? `Verification run ${id} created for ${knowledgeId} — observation + hypothesis recorded, environment captured. Next: submit the test plan.`
+  1135→        : `Run ${id} created in memory but NOT saved: ${w.error}`,
+  1136→      { id, knowledgeId });
+  1137→    deps?.broadcastState();
+  1138→    if (!w.ok) return { ok: false, error: w.error };
+  1139→    return { ok: true, run: rec };
+  1140→  });
+  1141→}
+  1142→
+  1143→/* ------------------------------------------------------------------ */
+  1144→/* Workflow — PHASE 3/4: experiment design + test plan (→ READY)       */
+  1145→/* ------------------------------------------------------------------ */
+  1146→
+  1147→async function submitPlan(
+  1148→  input: PlanInput,
+  1149→  source: VSource,
+  1150→  actor: string,
+  1151→): Promise<{ ok: boolean; run?: VRun; error?: string; refused?: string[] }> {
+  1152→  return enqueue(async () => {
+  1153→    const run = findRun(String(input?.runId ?? ''));
+  1154→    if (!run) return { ok: false, error: `unknown verification run "${input.runId}"` };
+  1155→    if (run.status !== 'PLANNING' && run.status !== 'READY') {
+  1156→      return { ok: false, error: `run ${run.id} is ${run.status} — plans can only be submitted while PLANNING (or amended while READY before start)` };
+  1157→    }
+  1158→    const casesIn = Array.isArray(input?.cases) ? input.cases : [];
+  1159→    if (casesIn.length === 0) return { ok: false, error: 'a plan needs at least one test case' };
+  1160→    if (run.status === 'READY') {
+  1161→      // amend: drop previous unexecuted cases of round 1 and re-plan
+  1162→      store.cases = store.cases.filter((c) => !(c.runId === run.id && c.status === 'NOT_EXECUTED'));
+  1163→    }
+  1164→    const refused: string[] = [];
+  1165→    const added: VTestCase[] = [];
+  1166→    for (const c of casesIn) {
+  1167→      const n = normalizeCase(c, run, 1);
+  1168→      if (!n.ok) {
+  1169→        refused.push(n.error);
+  1170→      } else {
+  1171→        store.cases.push(n.tc);
+  1172→        added.push(n.tc);
+  1173→      }
+  1174→    }
+  1175→    if (added.length === 0) {
+  1176→      return { ok: false, error: `no test case could be accepted: ${refused.join('; ')}`, refused };
+  1177→    }
+  1178→    if (run.strategy && input?.experiments) {
+  1179→      run.strategy = truncate(`${run.strategy}\n\nExperiments: ${input.experiments}`, 6000);
+  1180→    } else if (input?.experiments) {
+  1181→      run.strategy = truncate(String(input.experiments), 4000);
+  1182→    }
+  1183→    stepStart(run, 3);
+  1184→    stepComplete(run, 3, truncate(input?.experiments ?? added.map((c) => c.name).join(' · '), 300));
+  1185→    stepStart(run, 4);
+  1186→    stepComplete(run, 4, `${added.length} test case(s) planned — review on the dashboard, then start verification`);
+  1187→    run.needsDangerousConfirm = added.some((c) => c.flags.requiresNetwork || c.flags.destructive);
+  1188→    run.status = 'READY';
+  1189→    run.stats = computeStats(run.id);
+  1190→    run.updatedAt = nowIso();
+  1191→    dirty.cases = dirty.runs = dirty.meta = true;
+  1192→    const w = await persistDirty();
+  1193→    journal(source, actor, 'verification:plan', w.ok,
+  1194→      w.ok
+  1195→        ? `Test plan for ${run.id} accepted: ${added.length} case(s)${run.needsDangerousConfirm ? ' (⚠ contains network/destructive tests — owner confirmation required at start)' : ''}. Plan is READY for review and execution.`
+  1196→        : `Plan NOT saved: ${w.error}`,
+  1197→      { runId: run.id, cases: added.length, refused: refused.length });
+  1198→    deps?.broadcastState();
+  1199→    if (!w.ok) return { ok: false, error: w.error, refused };
+  1200→    return { ok: true, run, refused: refused.length ? refused : undefined };
+  1201→  });
+  1202→}
+  1203→
+  1204→/* ------------------------------------------------------------------ */
+  1205→/* Workflow — PHASE 5/6: execution engine                              */
+  1206→/* ------------------------------------------------------------------ */
+  1207→
+  1208→async function startRun(
+  1209→  runId: string,
+  1210→  source: VSource,
+  1211→  actor: string,
+  1212→  opts: { confirmDangerous?: boolean } = {},
+  1213→): Promise<{ ok: boolean; error?: string }> {
+  1214→  return enqueue(async () => {
+  1215→    const run = findRun(String(runId ?? ''));
+  1216→    if (!run) return { ok: false, error: `unknown verification run "${runId}"` };
+  1217→    if (run.status !== 'READY' && run.status !== 'ANALYZING') {
+  1218→      return { ok: false, error: `run ${run.id} is ${run.status} — only READY runs (or ANALYZING runs getting a regression round) can start execution` };
+  1219→    }
+  1220→    if (activeExecutions.has(run.id)) {
+  1221→      return { ok: false, error: `run ${run.id} is already executing` };
+  1222→    }
+  1223→    if (!deps) {
+  1224→      return { ok: false, error: 'verification module not initialized' };
+  1225→    }
+  1226→    const isRegressionContinuation = run.status === 'ANALYZING';
+  1227→    const pendingCases = runCases(run.id).filter((c) => c.status === 'NOT_EXECUTED');
+  1228→    if (pendingCases.length === 0) {
+  1229→      return { ok: false, error: 'no unexecuted test cases — add a regression round or go straight to analysis/report' };
+  1230→    }
+  1231→    const dangerous = pendingCases.filter((c) => c.flags.requiresNetwork || c.flags.destructive);
+  1232→    if (dangerous.length > 0 && !opts.confirmDangerous) {
+  1233→      return {
+  1234→        ok: false,
+  1235→        error: `${dangerous.length} test(s) are flagged network/destructive (${dangerous.map((c) => c.name).join(', ')}). The owner must explicitly confirm before they can run.`,
+  1236→      };
+  1237→    }
+  1238→    run.cancelled = false;
+  1239→    run.cancelReason = '';
+  1240→    run.status = 'TESTING';
+  1241→    run.startedAt = run.startedAt ?? nowIso();
+  1242→    run.updatedAt = nowIso();
+  1243→    dirty.runs = true;
+  1244→    const w = await persistDirty();
+  1245→    if (!w.ok) return { ok: false, error: w.error };
+  1246→
+  1247→    journal(source, actor, 'verification:start', true,
+  1248→      `Verification ${run.id} execution STARTED by ${actor} — ${pendingCases.length} test(s)${dangerous.length ? ' (dangerous tests confirmed)' : ''}${isRegressionContinuation ? ' [regression round]' : ''}.`,
+  1249→      { runId: run.id, cases: pendingCases.length });
+  1250→
+  1251→    // fire-and-forget: the loop broadcasts progress; the caller returns now
+  1252→    void executeLoop(run.id, source, actor).catch(async (e) => {
+  1253→      const r = findRun(run.id);
+  1254→      if (r) {
+  1255→        r.status = 'BLOCKED';
+  1256→        r.cancelReason = `execution engine error: ${e instanceof Error ? e.message : String(e)}`;
+  1257→        r.updatedAt = nowIso();
+  1258→        dirty.runs = true;
+  1259→        await persistDirty();
+  1260→        journal('system', 'System', 'verification:engine', false, r.cancelReason, { runId: r.id });
+  1261→        deps?.broadcastState();
+  1262→      }
+  1263→    });
+  1264→    return { ok: true };
+  1265→  });
+  1266→}
+  1267→
+  1268→async function executeLoop(runId: string, source: VSource, actor: string): Promise<void> {
+  1269→  activeExecutions.add(runId);
+  1270→  try {
+  1271→    const run = findRun(runId);
+  1272→    if (!run) return;
+  1273→    stepStart(run, 6, 'executing the test plan on the real workspace…');
+  1274→    if (run.status !== 'TESTING') run.status = 'TESTING';
+  1275→    dirty.runs = true;
+  1276→    await persistDirty();
+  1277→    broadcastRunFor(runId);
+  1278→
+  1279→    // sandbox dir for this run's scratch files (created for real)
+  1280→    await deps!.runTest(`mkdir -p ${verificationSandboxDir(runId)}`, 15_000, { source, actor });
+  1281→
+  1282→    const loopStart = Date.now();
+  1283→    const queue = runCases(runId).filter((c) => c.status === 'NOT_EXECUTED');
+  1284→    for (const tc of queue) {
+  1285→      const r = findRun(runId)!;
+  1286→      if (r.cancelled) {
+  1287→        for (const c of runCases(runId)) {
+  1288→          if (c.status === 'NOT_EXECUTED') {
+  1289→            c.status = 'SKIPPED';
+  1290→          }
+  1291→        }
+  1292→        dirty.cases = true;
+  1293→        break;
+  1294→      }
+  1295→      if (Date.now() - loopStart + r.elapsedMs > r.timeBudgetMs) {
+  1296→        for (const c of runCases(runId)) {
+  1297→          if (c.status === 'NOT_EXECUTED') c.status = 'BLOCKED';
+  1298→        }
+  1299→        r.cancelReason = `run time budget exceeded (${Math.round(r.timeBudgetMs / 1000)}s) — remaining tests BLOCKED`;
+  1300→        dirty.cases = dirty.runs = true;
+  1301→        break;
+  1302→      }
+  1303→      // real, journaled execution on the user's machine
+  1304→      const startedAt = Date.now();
+  1305→      const res = await deps!.runTest(tc.command, tc.timeoutMs, { source, actor });
+  1306→      const completedAt = Date.now();
+  1307→      const evalRes = evaluateAttempt(tc.criteria, {
+  1308→        exitCode: res.exitCode,
+  1309→        timedOut: res.timedOut,
+  1310→        output: res.output,
+  1311→      });
+  1312→      const attempt: VAttempt = {
+  1313→        id: nextId('vta'),
+  1314→        testCaseId: tc.id,
+  1315→        runId,
+  1316→        round: r.rounds.length,
+  1317→        attemptNumber: caseAttempts(tc.id).length + 1,
+  1318→        status: evalRes.status,
+  1319→        command: tc.command,
+  1320→        exitCode: res.exitCode,
+  1321→        timedOut: res.timedOut,
+  1322→        output: truncate(redact(res.output), MAX_ATTEMPT_OUTPUT_CHARS),
+  1323→        durationMs: res.durationMs > 0 ? res.durationMs : completedAt - startedAt,
+  1324→        startedAt: new Date(startedAt).toISOString(),
+  1325→        completedAt: new Date(completedAt).toISOString(),
+  1326→        journalRef: res.journalRef ?? null,
+  1327→        evaluatedBy: 'bridge-evaluator',
+  1328→        note: evalRes.note,
+  1329→      };
+  1330→      store.attempts.push(attempt);
+  1331→      tc.status = attempt.status;
+  1332→      tc.latestAttemptId = attempt.id;
+  1333→      const rr = findRun(runId)!;
+  1334→      rr.elapsedMs += attempt.durationMs;
+  1335→      rr.stats = computeStats(runId);
+  1336→      rr.updatedAt = nowIso();
+  1337→      dirty.attempts = dirty.cases = dirty.runs = dirty.meta = true;
+  1338→      const w = await persistDirty();
+  1339→      if (!w.ok) {
+  1340→        journal('system', 'System', 'verification:engine', false, `attempt persist failed: ${w.error}`, { runId });
+  1341→      }
+  1342→      journal(source, actor, 'verification:test', attempt.status === 'PASS',
+  1343→        `${tc.id} "${tc.name}" → ${attempt.status} (exit ${attempt.exitCode ?? 'n/a'}, ${attempt.durationMs}ms) — ${attempt.note}`,
+  1344→        { runId, caseId: tc.id, attemptId: attempt.id, status: attempt.status, exitCode: attempt.exitCode });
+  1345→      broadcastRunFor(runId);
+  1346→    }
+  1347→
+  1348→    const run2 = findRun(runId)!;
+  1349→    if (run2.cancelled) {
+  1350→      run2.status = 'BLOCKED';
+  1351→      stepSkip(run2, 6, `cancelled by the owner: ${run2.cancelReason}`);
+  1352→      if (run2.rounds.length > 0) {
+  1353→        run2.rounds[run2.rounds.length - 1].outcome = 'cancelled mid-execution';
+  1354→      }
+  1355→    } else {
+  1356→      stepComplete(run2, 6, `${run2.stats.executed} executed · ${run2.stats.passed} passed · ${run2.stats.failed} failed · ${run2.stats.errors} errors`);
+  1357→      run2.status = 'ANALYZING';
+  1358→      stepStart(run2, 7, 'awaiting GLM result analysis (bridge-validated)…');
+  1359→      if (run2.rounds.length > 0) {
+  1360→        const st = run2.stats;
+  1361→        run2.rounds[run2.rounds.length - 1].outcome = `${st.passed}/${st.executed} executed tests passed (pass rate ${st.passRate ?? 'N/A'}%)`;
+  1362→      }
+  1363→    }
+  1364→    run2.stats = computeStats(runId);
+  1365→    run2.updatedAt = nowIso();
+  1366→    dirty.runs = true;
+  1367→    await persistDirty();
+  1368→    broadcastRunFor(runId);
+  1369→  } finally {
+  1370→    activeExecutions.delete(runId);
+  1371→  }
+  1372→}
+  1373→
+  1374→async function cancelRun(
+  1375→  runId: string,
+  1376→  source: VSource,
+  1377→  actor: string,
+  1378→  reason = '',
+  1379→): Promise<{ ok: boolean; error?: string }> {
+  1380→  return enqueue(async () => {
+  1381→    const run = findRun(String(runId ?? ''));
+  1382→    if (!run) return { ok: false, error: `unknown verification run "${runId}"` };
+  1383→    if (run.status !== 'TESTING') {
+  1384→      return { ok: false, error: `run ${run.id} is ${run.status} — only TESTING runs can be cancelled` };
+  1385→    }
+  1386→    run.cancelled = true;
+  1387→    run.cancelReason = truncate(reason || `cancelled by ${actor}`, 500);
+  1388→    run.updatedAt = nowIso();
+  1389→    dirty.runs = true;
+  1390→    const w = await persistDirty();
+  1391→    journal(source, actor, 'verification:cancel', w.ok,
+  1392→      `Verification ${run.id} CANCEL requested by ${actor} — takes effect before the next test starts.`,
+  1393→      { runId: run.id });
+  1394→    deps?.broadcastState();
+  1395→    return w.ok ? { ok: true } : { ok: false, error: w.error };
+  1396→  });
+  1397→}
+  1398→
+  1399→/* ------------------------------------------------------------------ */
+  1400→/* Metric validation — values must appear in cited real outputs        */
+  1401→/* ------------------------------------------------------------------ */
+  1402→
+  1403→function validateMetric(
+  1404→  m: { name: string; value: string | number; unit?: string; testCaseId?: string },
+  1405→  runId: string,
+  1406→): { ok: true; verified: boolean; testCaseId: string | null; note: string } | { ok: false; error: string } {
+  1407→  const name = String(m?.name ?? '').trim();
+  1408→  const rawVal = m?.value;
+  1409→  if (!name || rawVal === undefined || rawVal === null || String(rawVal) === '') {
+  1410→    return { ok: false, error: 'a metric needs a name and a value' };
+  1411→  }
+  1412→  const valueStr = String(rawVal);
+  1413→  let testCaseId: string | null = null;
+  1414→  let citedOutput: string | null = null;
+  1415→  if (m.testCaseId) {
+  1416→    const tc = store.cases.find((c) => c.id === m.testCaseId && c.runId === runId);
+  1417→    if (!tc) return { ok: false, error: `metric "${name}" cites unknown test case "${m.testCaseId}"` };
+  1418→    const att = caseAttempts(tc.id)[caseAttempts(tc.id).length - 1];
+  1419→    if (!att) return { ok: false, error: `metric "${name}" cites test ${tc.id} which has no executed attempt` };
+  1420→    testCaseId = tc.id;
+  1421→    citedOutput = att.output;
+  1422→  }
+  1423→  if (citedOutput === null) {
+  1424→    return { ok: true, verified: false, testCaseId: null, note: 'not tied to a test attempt — recorded as reported, not measured' };
+  1425→  }
+  1426→  if (citedOutput.includes(valueStr)) {
+  1427→    return { ok: true, verified: true, testCaseId, note: `value "${valueStr}" found verbatim in the cited attempt output` };
+  1428→  }
+  1429→  // numeric tolerance match (formatting drift: 0.313261687 vs 0.313262)
+  1430→  const v = Number(valueStr);
+  1431→  if (Number.isFinite(v)) {
+  1432→    const nums = citedOutput.match(/-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g) ?? [];
+  1433→    for (const ns of nums) {
+  1434→      const nv = Number(ns);
+  1435→      if (Number.isFinite(nv)) {
+  1436→        const rel = Math.abs(nv - v) / (Math.max(Math.abs(v), Math.abs(nv), 1e-12));
+  1437→        if (rel < 1e-6) {
+  1438→          return { ok: true, verified: true, testCaseId, note: `value ${valueStr} matches ${ns} in the cited attempt output (numeric match)` };
+  1439→        }
+  1440→      }
+  1441→    }
+  1442→  }
+  1443→  return { ok: false, error: `metric "${name}" value "${valueStr}" was NOT found in the cited test output — the bridge refuses to record measurements that the evidence does not contain` };
+  1444→}
+  1445→
+  1446→/* ------------------------------------------------------------------ */
+  1447→/* Workflow — PHASE 6/7: analysis (bridge-validated) + conclusion      */
+  1448→/* ------------------------------------------------------------------ */
+  1449→
+  1450→async function submitAnalysis(
+  1451→  input: AnalysisInput,
+  1452→  source: VSource,
+  1453→  actor: string,
+  1454→): Promise<{ ok: boolean; run?: VRun; analysis?: VAnalysis; error?: string; rejectedMetrics?: string[] }> {
+  1455→  return enqueue(async () => {
+  1456→    const run = findRun(String(input?.runId ?? ''));
+  1457→    if (!run) return { ok: false, error: `unknown verification run "${input.runId}"` };
+  1458→    if (run.status !== 'ANALYZING') {
+  1459→      return { ok: false, error: `run ${run.id} is ${run.status} — analysis is submitted after execution completes (TESTING → ANALYZING)` };
+  1460→    }
+  1461→    const round = run.rounds.length;
+  1462→    const proposedStatus = String(input?.proposedConclusion?.status ?? '').toUpperCase() as VConclusionStatus;
+  1463→    const validStatuses: VConclusionStatus[] = ['VERIFIED', 'PARTIALLY_VERIFIED', 'FAILED', 'BLOCKED'];
+  1464→    if (!validStatuses.includes(proposedStatus)) {
+  1465→      return { ok: false, error: `proposedConclusion.status must be one of ${validStatuses.join(' | ')}` };
+  1466→    }
+  1467→
+  1468→    // metrics: each value must exist in the cited attempt's real output
+  1469→    const rejectedMetrics: string[] = [];
+  1470→    const acceptedMetrics: VMetric[] = [];
+  1471→    const metricsIn = (Array.isArray(input?.metrics) ? input.metrics : []).slice(0, MAX_METRICS_PER_ANALYSIS);
+  1472→    for (const m of metricsIn) {
+  1473→      const v = validateMetric(m, run.id);
+  1474→      if (!v.ok) {
+  1475→        rejectedMetrics.push(v.error);
+  1476→      } else {
+  1477→        acceptedMetrics.push({
+  1478→          id: nextId('vmet'),
+  1479→          runId: run.id,
+  1480→          testCaseId: v.testCaseId,
+  1481→          name: truncate(m.name, 200),
+  1482→          value: truncate(String(m.value), 200),
+  1483→          unit: truncate(m.unit ?? '', 100),
+  1484→          source: v.verified ? 'measured' : 'reported',
+  1485→          verified: v.verified,
+  1486→          recordedAt: nowIso(),
+  1487→        });
+  1488→      }
+  1489→    }
+  1490→    store.metrics.push(...acceptedMetrics);
+  1491→
+  1492→    // THE ENGINE decides the effective conclusion from computed stats
+  1493→    const stats = computeStats(run.id);
+  1494→    const engine = engineConclusion(run.id);
+  1495→    const accepted = engine.status === proposedStatus;
+  1496→    const analysis: VAnalysis = {
+  1497→      id: `VANA-${run.analyses.length + 1}-${Date.now().toString(36)}`,
+  1498→      round,
+  1499→      submittedBy: actor,
+  1500→      createdAt: nowIso(),
+  1501→      summary: truncate(input?.summary ?? '', 4000),
+  1502→      comparison: truncate(input?.comparison ?? '', 4000),
+  1503→      alternativeExplanations: truncate(input?.alternativeExplanations ?? '', 2000),
+  1504→      recommendedModifications: truncate(input?.recommendedModifications ?? '', 2000),
+  1505→      proposedConclusion: {
+  1506→        status: proposedStatus,
+  1507→        summary: truncate(input?.proposedConclusion?.summary ?? '', 2000),
+  1508→      },
+  1509→      engineDecision: {
+  1510→        accepted,
+  1511→        effectiveStatus: engine.status,
+  1512→        reason: accepted
+  1513→          ? `GLM's proposal matches the evidence: ${engine.reason}`
+  1514→          : `GLM proposed ${proposedStatus} but the evidence says ${engine.status} — ${engine.reason}. The bridge records the evidence-based status.`,
+  1515→      },
+  1516→      metricIds: acceptedMetrics.map((m) => m.id),
+  1517→    };
+  1518→    run.analyses.push(analysis);
+  1519→    run.stats = stats;
+  1520→
+  1521→    if (round > 1) {
+  1522→      // a regression round was just analyzed — stage 8/9 complete
+  1523→      stepComplete(run, 8, `regression round ${round} analyzed: ${stats.passed}/${stats.executed} passed`);
+  1524→      stepComplete(run, 9, engine.reason);
+  1525→    } else {
+  1526→      stepComplete(run, 7, `${analysis.summary.slice(0, 200)} — engine decision: ${engine.status}${accepted ? '' : ' (GLM proposal rejected)'}`);
+  1527→      stepSkip(run, 8, 'no regression round requested — skipped');
+  1528→      stepComplete(run, 9, engine.reason);
+  1529→    }
+  1530→
+  1531→    run.conclusion = {
+  1532→      status: engine.status,
+  1533→      summary: engine.reason,
+  1534→      glmInterpretation: analysis.summary,
+  1535→      stats,
+  1536→      decidedAt: nowIso(),
+  1537→      decidedBy: 'bridge-evaluator (evidence-based)',
+  1538→    };
+  1539→    run.status = engine.status;
+  1540→    run.updatedAt = nowIso();
+  1541→    dirty.runs = dirty.metrics = dirty.meta = true;
+  1542→    const w = await persistDirty();
+  1543→    journal(source, actor, 'verification:analyze', w.ok && true,
+  1544→      `Analysis for ${run.id} round ${round} recorded — engine conclusion: ${engine.status}${accepted ? '' : ` (GLM proposed ${proposedStatus} — REJECTED by evidence)`}. ${acceptedMetrics.length} metric(s) accepted${rejectedMetrics.length ? `, ${rejectedMetrics.length} REFUSED (not in evidence)` : ''}.`,
+  1545→      { runId: run.id, effectiveStatus: engine.status, accepted, metrics: acceptedMetrics.length, refusedMetrics: rejectedMetrics.length });
+  1546→    deps?.broadcastState();
+  1547→    if (!w.ok) return { ok: false, error: w.error, rejectedMetrics };
+  1548→    return { ok: true, run, analysis, rejectedMetrics: rejectedMetrics.length ? rejectedMetrics : undefined };
+  1549→  });
+  1550→}
+  1551→
+  1552→/* ------------------------------------------------------------------ */
+  1553→/* Workflow — PHASE 7 (regression round) + failure-revision cycles     */
+  1554→/* ------------------------------------------------------------------ */
+  1555→
+  1556→async function addRegression(
+  1557→  input: RegressInput,
+  1558→  source: VSource,
+  1559→  actor: string,
+  1560→): Promise<{ ok: boolean; run?: VRun; error?: string; refused?: string[] }> {
+  1561→  return enqueue(async () => {
+  1562→    const run = findRun(String(input?.runId ?? ''));
+  1563→    if (!run) return { ok: false, error: `unknown verification run "${input.runId}"` };
+  1564→    if (!['VERIFIED', 'PARTIALLY_VERIFIED', 'FAILED', 'ANALYZING'].includes(run.status)) {
+  1565→      return { ok: false, error: `run ${run.id} is ${run.status} — regression rounds are added after an analysis (or while ANALYZING)` };
+  1566→    }
+  1567→    if (run.reportEvidenceId) {
+  1568→      return { ok: false, error: `run ${run.id} already has a final report — start a new verification run instead` };
+  1569→    }
+  1570→    const casesIn = Array.isArray(input?.cases) ? input.cases : [];
+  1571→    const retryIds = Array.isArray(input?.retry) ? input.retry.map(String) : [];
+  1572→    const updatesIn = Array.isArray(input?.updates) ? input.updates : [];
+  1573→    if (casesIn.length === 0 && retryIds.length === 0 && updatesIn.length === 0) {
+  1574→      return { ok: false, error: 'a regression round needs new test cases, retried case ids, and/or case updates' };
+  1575→    }
+  1576→    const round = run.rounds.length + 1;
+  1577→    const refused: string[] = [];
+  1578→    const added: VTestCase[] = [];
+  1579→    for (const c of casesIn) {
+  1580→      const n = normalizeCase(c, run, round);
+  1581→      if (!n.ok) refused.push(n.error);
+  1582→      else {
+  1583→        store.cases.push(n.tc);
+  1584→        added.push(n.tc);
+  1585→      }
+  1586→    }
+  1587→    if (added.length === 0 && retryIds.length === 0 && updatesIn.length === 0) return { ok: false, error: `no test case accepted: ${refused.join('; ')}`, refused };
+  1588→    // case UPDATES: revise a case definition (criteria / command / expected)
+  1589→    // as the outcome of a failure investigation — the revision is journaled,
+  1590→    // prior attempts stay untouched, and the case re-runs this round.
+  1591→    let updated = 0;
+  1592→    for (const u of updatesIn) {
+  1593→      const tc = store.cases.find((c) => c.id === String(u?.id ?? '') && c.runId === run.id);
+  1594→      if (!tc) { refused.push(`update: unknown case "${u?.id}" on this run`); continue; }
+  1595→      if (u.command !== undefined) {
+  1596→        const cmd = String(u.command).trim();
+  1597→        if (!cmd || COMMAND_BLOCK_PATTERNS.some((re) => re.test(cmd))) {
+  1598→          refused.push(`update ${tc.id}: refused command revision`);
+  1599→          continue;
+  1600→        }
+  1601→        tc.command = truncate(cmd, 2000);
+  1602→      }
+  1603→      if (u.criteria) {
+  1604→        const c = u.criteria;
+  1605→        tc.criteria = {
+  1606→          exitCode: Number.isFinite(c.exitCode) ? Number(c.exitCode) : tc.criteria.exitCode,
+  1607→          outputContains: Array.isArray(c.outputContains) ? c.outputContains.map((x) => truncate(x, 300)).filter(Boolean) : tc.criteria.outputContains,
+  1608→          outputNotContains: Array.isArray(c.outputNotContains) ? c.outputNotContains.map((x) => truncate(x, 300)).filter(Boolean) : tc.criteria.outputNotContains,
+  1609→        };
+  1610→      }
+  1611→      if (u.expected) {
+  1612→        tc.expected = {
+  1613→          expectedResult: u.expected.expectedResult !== undefined ? truncate(u.expected.expectedResult, 1000) : tc.expected.expectedResult,
+  1614→          successCriteria: u.expected.successCriteria !== undefined ? truncate(u.expected.successCriteria, 1000) : tc.expected.successCriteria,
+  1615→          failureCriteria: u.expected.failureCriteria !== undefined ? truncate(u.expected.failureCriteria, 1000) : tc.expected.failureCriteria,
+  1616→        };
+  1617→      }
+  1618→      if (u.name) tc.name = truncate(u.name, 200);
+  1619→      if (u.objective !== undefined) tc.objective = truncate(u.objective, 1000);
+  1620→      if (Number(u.timeoutMs) > 0) tc.timeoutMs = Math.min(Number(u.timeoutMs), MAX_TEST_TIMEOUT_MS);
+  1621→      if (tc.status !== 'NOT_EXECUTED') {
+  1622→        tc.status = 'NOT_EXECUTED';
+  1623→      }
+  1624→      updated++;
+  1625→    }
+  1626→    // retried cases: reset to NOT_EXECUTED so the engine re-runs them this
+  1627→    // round — every prior attempt stays in attempts.jsonl as history (§11)
+  1628→    let retried = 0;
+  1629→    for (const rid of retryIds) {
+  1630→      const tc = store.cases.find((c) => c.id === rid && c.runId === run.id);
+  1631→      if (!tc) { refused.push(`retry: unknown case "${rid}" on this run`); continue; }
+  1632→      if (tc.status === 'NOT_EXECUTED') continue; // already queued
+  1633→      tc.status = 'NOT_EXECUTED';
+  1634→      retried++;
+  1635→    }
+  1636→    run.rounds.push({
+  1637→      n: round,
+  1638→      kind: 'regression',
+  1639→      hypothesis: truncate(input?.hypothesis ?? '(revised hypothesis not stated)', 4000),
+  1640→      expectedObservation: truncate(input?.expectedObservation ?? '', 2000),
+  1641→      changeNote: truncate(input?.changeNote ?? '', 2000),
+  1642→      createdAt: nowIso(),
+  1643→      outcome: '',
+  1644→    });
+  1645→    stepStart(run, 8, `regression round ${round}: ${added.length} new test(s)${retried ? `, ${retried} retried` : ''}${updated ? `, ${updated} case definition(s) revised` : ''}${input?.hypothesis ? ' — revised hypothesis: ' + truncate(input.hypothesis, 150) : ''}`);
+  1646→    const dangerous = added.some((c) => c.flags.requiresNetwork || c.flags.destructive);
+  1647→    run.needsDangerousConfirm = run.needsDangerousConfirm || dangerous;
+  1648→    run.status = dangerous ? 'READY' : 'TESTING'; // dangerous new tests need a fresh owner confirm
+  1649→    run.stats = computeStats(run.id);
+  1650→    run.updatedAt = nowIso();
+  1651→    dirty.cases = dirty.runs = dirty.meta = true;
+  1652→    const w = await persistDirty();
+  1653→    journal(source, actor, 'verification:regress', w.ok,
+  1654→      `Regression round ${round} added to ${run.id}: ${added.length} new test(s)${retried ? `, ${retried} retried` : ''}${updated ? `, ${updated} revised (criteria corrections — history preserved)` : ''}, previous rounds preserved.${dangerous ? ' ⚠ contains dangerous tests — waiting for owner confirmation.' : ' Execution starting.'}`,
+  1655→      { runId: run.id, round, cases: added.length, retried, updated });
+  1656→    deps?.broadcastState();
+  1657→    if (!w.ok) return { ok: false, error: w.error, refused };
+  1658→
+  1659→    if (!dangerous) {
+  1660→      // auto-execute the regression round (owner already consented to this run;
+  1661→      // no NEW dangerous commands were introduced)
+  1662→      void executeLoop(run.id, source, actor).catch(async (e) => {
+  1663→        const r = findRun(run.id);
+  1664→        if (r) {
+  1665→          r.status = 'BLOCKED';
+  1666→          r.cancelReason = `execution engine error: ${e instanceof Error ? e.message : String(e)}`;
+  1667→          dirty.runs = true;
+  1668→          await persistDirty();
+  1669→          journal('system', 'System', 'verification:engine', false, r.cancelReason, { runId: r.id });
+  1670→          deps?.broadcastState();
+  1671→        }
+  1672→      });
+  1673→    }
+  1674→    return { ok: true, run, refused: refused.length ? refused : undefined };
+  1675→  });
+  1676→}
+  1677→
+  1678→/* ------------------------------------------------------------------ */
+  1679→/* Workflow — PHASE 8: final report (assembled from persisted records) */
+  1680→/* ------------------------------------------------------------------ */
+  1681→
+  1682→function buildReport(runId: string, knowledgeContext: { title: string; solutionSteps: string } | null): { json: Record<string, unknown>; md: string } {
+  1683→  const d = detailFor(runId);
+  1684→  const run = d.run;
+  1685→  const byCase = new Map<string, VAttempt[]>();
+  1686→  for (const a of d.attempts) {
+  1687→    const list = byCase.get(a.testCaseId) ?? [];
+  1688→    list.push(a);
+  1689→    byCase.set(a.testCaseId, list);
+  1690→  }
+  1691→  const glmLabel = 'AI INTERPRETATION (submitted by GLM — not measurement)';
+  1692→  const report = {
+  1693→    id: `RPT-${run.id}`,
+  1694→    runId: run.id,
+  1695→    knowledge: {
+  1696→      id: run.knowledgeId,
+  1697→      version: run.knowledgeVersion,
+  1698→      title: knowledgeContext?.title ?? null,
+  1699→      solutionUnderTest: knowledgeContext?.solutionSteps ?? null,
+  1700→    },
+  1701→    generatedAt: nowIso(),
+  1702→    generatedBy: 'bridge report generator (assembled from persisted execution records)',
+  1703→    verificationStatus: run.status,
+  1704→    conclusion: run.conclusion,
+  1705→    originalProblem: run.problem,
+  1706→    hypothesis: run.hypothesis,
+  1707→    hypothesisHistory: run.rounds,
+  1708→    strategy: run.strategy,
+  1709→    environment: run.environmentSnapshot,
+  1710→    reproducibility: {
+  1711→      os: run.environmentSnapshot?.os ?? null,
+  1712→      runtimes: run.environmentSnapshot?.runtimes ?? null,
+  1713→      sourceRevision: run.environmentSnapshot?.sourceRevision ?? null,
+  1714→      testCommands: d.cases.map((c) => ({ id: c.id, command: c.command, timeoutMs: c.timeoutMs })),
+  1715→      note: 'Re-run the listed commands in the recorded environment to reproduce. All outputs below were captured by the bridge from real executions.',
+  1716→    },
+  1717→    timeline: run.steps,
+  1718→    statistics: run.stats,
+  1719→    testCases: d.cases.map((c) => ({
+  1720→      id: c.id,
+  1721→      name: c.name,
+  1722→      objective: c.objective,
+  1723→      category: c.category,
+  1724→      round: c.round,
+  1725→      critical: c.flags.critical,
+  1726→      expected: c.expected,
+  1727→      criteria: c.criteria,
+  1728→      command: c.command,
+  1729→      finalStatus: c.status,
+  1730→      attempts: (byCase.get(c.id) ?? []).map((a) => ({
+  1731→        attempt: a.attemptNumber,
+  1732→        status: a.status,
+  1733→        exitCode: a.exitCode,
+  1734→        timedOut: a.timedOut,
+  1735→        durationMs: a.durationMs,
+  1736→        startedAt: a.startedAt,
+  1737→        journalRef: a.journalRef,
+  1738→        note: a.note,
+  1739→        output: a.output,
+  1740→      })),
+  1741→    })),
+  1742→    metrics: d.metrics,
+  1743→    analyses: run.analyses,
+  1744→    feedback: run.feedback,
+  1745→    limitations: [
+  1746→      'Commands executed on the user\'s machine through the VS Code extension as the local user — no CPU/memory sandbox isolation is enforceable through this transport.',
+  1747→      'Network access for non-flagged tests could not be technically blocked; tests that declared network needs required explicit owner confirmation instead.',
+  1748→      'Attempt outputs are redacted for secrets and capped at 20,000 characters per attempt.',
+  1749→    ],
+  1750→  };
+  1751→
+  1752→  const md: string[] = [];
+  1753→  md.push(`# Verification Report — ${run.id}`);
+  1754→  md.push('');
+  1755→  md.push(`- **Knowledge record:** ${run.knowledgeId} (version ${run.knowledgeVersion})${knowledgeContext ? ` — ${knowledgeContext.title}` : ''}`);
+  1756→  md.push(`- **Verification status:** ${run.status}`);
+  1757→  md.push(`- **Conclusion:** ${run.conclusion ? `${run.conclusion.status} — ${run.conclusion.summary}` : '(not concluded)'}`);
+  1758→  md.push(`- **Generated:** ${report.generatedAt} by the bridge (from persisted records only)`);
+  1759→  md.push('');
+  1760→  md.push(`## 1. Original problem`);
+  1761→  md.push(run.problem.description || '(none)');
+  1762→  if (run.problem.symptoms) md.push(`\n**Symptoms:** ${run.problem.symptoms}`);
+  1763→  if (run.problem.expectedBehavior) md.push(`**Expected:** ${run.problem.expectedBehavior}`);
+  1764→  if (run.problem.actualBehavior) md.push(`**Actual:** ${run.problem.actualBehavior}`);
+  1765→  if (run.problem.facts) md.push(`\n**Facts:** ${run.problem.facts}`);
+  1766→  if (run.problem.assumptions) md.push(`**Assumptions:** ${run.problem.assumptions}`);
+  1767→  md.push('');
+  1768→  md.push(`## 2. Hypothesis (initial)`);
+  1769→  md.push(run.hypothesis.text);
+  1770→  if (run.hypothesis.expectedObservation) md.push(`\n**Expected observation:** ${run.hypothesis.expectedObservation}`);
+  1771→  md.push('');
+  1772→  md.push(`## 3. Hypothesis history (all rounds preserved)`);
+  1773→  for (const r of run.rounds) {
+  1774→    md.push(`- **Round ${r.n}** (${r.kind}): ${r.hypothesis}${r.changeNote ? ` — _${r.changeNote}_` : ''}${r.outcome ? ` → ${r.outcome}` : ''}`);
+  1775→  }
+  1776→  md.push('');
+  1777→  md.push(`## 4. Testing environment`);
+  1778→  md.push(`- OS: ${run.environmentSnapshot?.os ?? 'unknown'}`);
+  1779→  md.push(`- Runtimes: ${run.environmentSnapshot?.runtimes ?? 'unknown'}`);
+  1780→  md.push(`- Source revision: ${run.environmentSnapshot?.sourceRevision ?? 'n/a'}`);
+  1781→  md.push('');
+  1782→  md.push(`## 5. Statistics (computed by the bridge)`);
+  1783→  md.push(`| planned | executed | passed | failed | errors | skipped | blocked | attempts | pass rate |`);
+  1784→  md.push(`|---|---|---|---|---|---|---|---|---|`);
+  1785→  const s = run.stats;
+  1786→  md.push(`| ${s.planned} | ${s.executed} | ${s.passed} | ${s.failed} | ${s.errors} | ${s.skipped} | ${s.blocked} | ${s.attempts} | ${s.passRate === null ? 'N/A' : s.passRate + '%'} |`);
+  1787→  md.push('');
+  1788→  md.push(`## 6. Test results (every attempt preserved)`);
+  1789→  for (const c of d.cases) {
+  1790→    const atts = byCase.get(c.id) ?? [];
+  1791→    md.push(`### ${c.id} — ${c.name} [${c.status}] (${c.category}${c.flags.critical ? ', critical' : ''})`);
+  1792→    md.push(`- Objective: ${c.objective || '(none)'}`);
+  1793→    md.push(`- Command: \`${c.command}\``);
+  1794→    md.push(`- Success criteria: exit ${c.criteria.exitCode}${c.criteria.outputContains.length ? ` + output contains ${JSON.stringify(c.criteria.outputContains)}` : ''}`);
+  1795→    for (const a of atts) {
+  1796→      md.push(`- **Attempt ${a.attemptNumber}: ${a.status}** (exit ${a.exitCode ?? 'n/a'}, ${a.durationMs}ms, journal ${a.journalRef ?? 'n/a'}) — ${a.note}`);
+  1797→      if (a.output) md.push(`\n\`\`\`\n${a.output.slice(0, 2000)}\n\`\`\``);
+  1798→    }
+  1799→    if (atts.length === 0) md.push('- (never executed)');
+  1800→    md.push('');
+  1801→  }
+  1802→  if (d.metrics.length > 0) {
+  1803→    md.push(`## 7. Metrics`);
+  1804→    for (const m of d.metrics) {
+  1805→      md.push(`- **${m.name}:** ${m.value}${m.unit ? ' ' + m.unit : ''} — ${m.source}${m.verified ? ' (verified against cited output)' : ' (reported, untied)'}`);
+  1806→    }
+  1807→    md.push('');
+  1808→  }
+  1809→  if (run.analyses.length > 0) {
+  1810→    md.push(`## 8. ${glmLabel}`);
+  1811→    for (const a of run.analyses) {
+  1812→      md.push(`### Round ${a.round} analysis (by ${a.submittedBy})`);
+  1813→      md.push(a.summary || '(no summary)');
+  1814→      if (a.comparison) md.push(`\n**Expected vs observed:** ${a.comparison}`);
+  1815→      if (a.alternativeExplanations) md.push(`**Alternative explanations:** ${a.alternativeExplanations}`);
+  1816→      if (a.recommendedModifications) md.push(`**Recommended modifications:** ${a.recommendedModifications}`);
+  1817→      md.push(`\n**Proposed conclusion:** ${a.proposedConclusion.status} — ${a.proposedConclusion.summary}`);
+  1818→      md.push(`**Engine decision:** ${a.engineDecision.accepted ? 'ACCEPTED' : 'REJECTED'} → ${a.engineDecision.effectiveStatus}. ${a.engineDecision.reason}`);
+  1819→      md.push('');
+  1820→    }
+  1821→  }
+  1822→  md.push(`## 9. Limitations`);
+  1823→  for (const l of report.limitations as string[]) md.push(`- ${l}`);
+  1824→  if (run.feedback.length > 0) {
+  1825→    md.push('');
+  1826→    md.push(`## 10. Owner feedback`);
+  1827→    for (const f of run.feedback) md.push(`- **${f.decision}** by ${f.actor}: ${f.comment || '(no comment)'}`);
+  1828→  }
+  1829→  return { json: report, md: md.join('\n') };
+  1830→}
+  1831→
+  1832→async function generateReport(
+  1833→  runId: string,
+  1834→  source: VSource,
+  1835→  actor: string,
+  1836→  knowledgeContext: { title: string; solutionSteps: string } | null,
+  1837→): Promise<{ ok: boolean; evidence?: VEvidence; report?: Record<string, unknown>; error?: string }> {
+  1838→  return enqueue(async () => {
+  1839→    const run = findRun(String(runId ?? ''));
+  1840→    if (!run) return { ok: false, error: `unknown verification run "${runId}"` };
+  1841→    if (run.analyses.length === 0) {
+  1842→      return { ok: false, error: `run ${run.id} has no analysis yet — submit the result analysis before generating the report` };
+  1843→    }
+  1844→    if (!['VERIFIED', 'PARTIALLY_VERIFIED', 'FAILED', 'BLOCKED'].includes(run.status)) {
+  1845→      return { ok: false, error: `run ${run.id} is ${run.status} — reports are generated after a conclusion` };
+  1846→    }
+  1847→    const { json, md } = buildReport(run.id, knowledgeContext);
+  1848→    const jsonText = JSON.stringify(json, null, 2);
+  1849→    const dir = verificationEvidenceDir(run.id);
+  1850→    const jsonPath = `${dir}/report.json`;
+  1851→    const mdPath = `${dir}/report.md`;
+  1852→    const wOk1 = await wsWriteFile(jsonPath, jsonText);
+  1853→    const wOk2 = await wsWriteFile(mdPath, md);
+  1854→    if (!wOk1 || !wOk2) {
+  1855→      return { ok: false, error: 'writing the report artifacts to the workspace failed' };
+  1856→    }
+  1857→    const evJson: VEvidence = {
+  1858→      id: nextId('vev'),
+  1859→      runId: run.id,
+  1860→      testCaseId: null,
+  1861→      type: 'report',
+  1862→      filename: 'report.json',
+  1863→      storageRef: jsonPath,
+  1864→      sha256: sha256(jsonText),
+  1865→      bytes: jsonText.length,
+  1866→      createdAt: nowIso(),
+  1867→      createdBy: actor,
+  1868→    };
+  1869→    const evMd: VEvidence = {
+  1870→      id: nextId('vev'),
+  1871→      runId: run.id,
+  1872→      testCaseId: null,
+  1873→      type: 'report',
+  1874→      filename: 'report.md',
+  1875→      storageRef: mdPath,
+  1876→      sha256: sha256(md),
+  1877→      bytes: md.length,
+  1878→      createdAt: nowIso(),
+  1879→      createdBy: actor,
+  1880→    };
+  1881→    store.evidence.push(evJson, evMd);
+  1882→    run.reportEvidenceId = evJson.id;
+  1883→    if (!run.completedAt) {
+  1884→      run.completedAt = nowIso();
+  1885→      run.durationMs = run.startedAt ? Date.now() - Date.parse(run.startedAt) : null;
+  1886→    }
+  1887→    stepComplete(run, 10, `final report generated — ${evMd.storageRef} (sha256 ${evMd.sha256.slice(0, 16)}…)`);
+  1888→    run.currentStage = 10;
+  1889→    run.updatedAt = nowIso();
+  1890→    dirty.runs = dirty.evidence = dirty.meta = true;
+  1891→    const w = await persistDirty();
+  1892→    journal(source, actor, 'verification:report', w.ok,
+  1893→      w.ok
+  1894→        ? `Verification report for ${run.id} generated and stored as evidence (${run.status}). report.md + report.json written to ${dir}.`
+  1895→        : `Report generated but NOT saved: ${w.error}`,
+  1896→      { runId: run.id, status: run.status, sha256Json: evJson.sha256 });
+  1897→    deps?.broadcastState();
+  1898→    if (!w.ok) return { ok: false, error: w.error };
+  1899→    return { ok: true, evidence: evMd, report: json };
+  1900→  });
+  1901→}
+  1902→
+  1903→/* ------------------------------------------------------------------ */
+  1904→/* Owner feedback                                                      */
+  1905→/* ------------------------------------------------------------------ */
+  1906→
+  1907→async function recordFeedback(
+  1908→  runId: string,
+  1909→  decision: 'accept' | 'reject' | 'comment',
+  1910→  comment: string,
+  1911→  actor: string,
+  1912→): Promise<{ ok: boolean; error?: string }> {
+  1913→  return enqueue(async () => {
+  1914→    const run = findRun(String(runId ?? ''));
+  1915→    if (!run) return { ok: false, error: `unknown verification run "${runId}"` };
+  1916→    const fb: VFeedback = {
+  1917→      id: nextId('vfb'),
+  1918→      decision: decision === 'reject' ? 'reject' : decision === 'comment' ? 'comment' : 'accept',
+  1919→      comment: truncate(comment ?? '', 2000),
+  1920→      actor,
+  1921→      createdAt: nowIso(),
+  1922→    };
+  1923→    run.feedback.push(fb);
+  1924→    run.updatedAt = nowIso();
+  1925→    dirty.runs = dirty.meta = true;
+  1926→    const w = await persistDirty();
+  1927→    journal('web', actor, 'verification:feedback', w.ok,
+  1928→      `Owner feedback on ${run.id}: ${fb.decision}${fb.comment ? ` — "${truncate(fb.comment, 200)}"` : ''}.`,
+  1929→      { runId: run.id, decision: fb.decision });
+  1930→    deps?.broadcastState();
+  1931→    return w.ok ? { ok: true } : { ok: false, error: w.error };
+  1932→  });
+  1933→}
+  1934→
+  1935→/* ------------------------------------------------------------------ */
+  1936→/* Web state                                                           */
+  1937→/* ------------------------------------------------------------------ */
+  1938→
+  1939→function runForWeb(run: VRun): VRunForWeb {
+  1940→  return {
+  1941→    id: run.id,
+  1942→    knowledgeId: run.knowledgeId,
+  1943→    knowledgeVersion: run.knowledgeVersion,
+  1944→    title: run.title,
+  1945→    status: run.status,
+  1946→    currentStage: run.currentStage,
+  1947→    stageName: STAGES[run.currentStage - 1] ?? '',
+  1948→    hypothesis: run.hypothesis.text,
+  1949→    stats: run.stats,
+  1950→    needsDangerousConfirm: run.needsDangerousConfirm,
+  1951→    cancelled: run.cancelled,
+  1952→    startedAt: run.startedAt,
+  1953→    completedAt: run.completedAt,
+  1954→    updatedAt: run.updatedAt,
+  1955→    createdBy: run.createdBy,
+  1956→    conclusion: run.conclusion,
+  1957→  };
+  1958→}
+  1959→
+  1960→function stateForWeb(): VStateForWeb {
+  1961→  const byStatus = {} as Record<VRunStatus, number>;
+  1962→  const statuses: VRunStatus[] = ['PENDING', 'PLANNING', 'READY', 'TESTING', 'ANALYZING', 'PARTIALLY_VERIFIED', 'VERIFIED', 'FAILED', 'BLOCKED'];
+  1963→  for (const s of statuses) byStatus[s] = 0;
+  1964→  for (const r of store.runs) if (byStatus[r.status] !== undefined) byStatus[r.status]++;
+  1965→  return {
+  1966→    ok: true,
+  1967→    online: store.online,
+  1968→    syncedAt: store.syncedAt,
+  1969→    note: store.note,
+  1970→    counts: {
+  1971→      total: store.runs.length,
+  1972→      byStatus,
+  1973→      cases: store.cases.length,
+  1974→      attempts: store.attempts.length,
+  1975→      evidence: store.evidence.length,
+  1976→    },
+  1977→    runs: [...store.runs].sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1)).map(runForWeb),
+  1978→  };
+  1979→}
+  1980→
+  1981→/* ------------------------------------------------------------------ */
+  1982→/* Init + public API                                                   */
+  1983→/* ------------------------------------------------------------------ */
+  1984→
+  1985→export interface VerificationApi {
+  1986→  sync: (source?: VSource, actor?: string) => Promise<StoreState>;
+  1987→  createRun: (input: CreateRunInput, source: VSource, actor: string) => Promise<{ ok: boolean; run?: VRun; error?: string }>;
+  1988→  submitPlan: (input: PlanInput, source: VSource, actor: string) => Promise<{ ok: boolean; run?: VRun; error?: string; refused?: string[] }>;
+  1989→  startRun: (runId: string, source: VSource, actor: string, opts?: { confirmDangerous?: boolean }) => Promise<{ ok: boolean; error?: string }>;
+  1990→  cancelRun: (runId: string, source: VSource, actor: string, reason?: string) => Promise<{ ok: boolean; error?: string }>;
+  1991→  submitAnalysis: (input: AnalysisInput, source: VSource, actor: string) => Promise<{ ok: boolean; run?: VRun; analysis?: VAnalysis; error?: string; rejectedMetrics?: string[] }>;
+  1992→  addRegression: (input: RegressInput, source: VSource, actor: string) => Promise<{ ok: boolean; run?: VRun; error?: string; refused?: string[] }>;
+  1993→  generateReport: (runId: string, source: VSource, actor: string, knowledgeContext: { title: string; solutionSteps: string } | null) => Promise<{ ok: boolean; evidence?: VEvidence; report?: Record<string, unknown>; error?: string }>;
+  1994→  recordFeedback: (runId: string, decision: 'accept' | 'reject' | 'comment', comment: string, actor: string) => Promise<{ ok: boolean; error?: string }>;
+  1995→  getRun: (runId: string) => { ok: boolean; detail?: VRunDetail; error?: string };
+  1996→  stateForWeb: () => VStateForWeb;
+  1997→  detailFor: (runId: string) => VRunDetail;
+  1998→}
+  1999→
+  2000→export function initVerification(
+
+[showing lines 1-2000 of 2026; use offset=2001 with limit to continue reading]

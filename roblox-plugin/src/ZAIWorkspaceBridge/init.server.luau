@@ -1,0 +1,1162 @@
+--!nocheck
+-- ============================================================
+-- Z.ai Workspace Bridge — Roblox Studio plugin
+--
+-- The Roblox Studio counterpart of the VS Code extension
+-- (ai-code-agent.vsix): pairing, live game tree, script
+-- read/write, activity feed — same bridge, adapted to Studio.
+--
+--   1. Download this plugin and drop it into the Studio
+--      Plugins folder (Plugins tab -> Plugins Folder).
+--   2. Game Settings -> Security -> enable "Allow HTTP Requests".
+--   3. Toolbar "Z.ai Bridge" -> paste the dashboard URL -> Connect.
+--   4. Type the 6-character pairing code into the dashboard.
+--
+-- Transport: HTTP long-polling (Studio plugins have no
+-- WebSockets). The plugin polls POST /rbx/poll and executes the
+-- same tools the VS Code extension executes (list_files,
+-- read_file, write_file, edit_file, delete_file, move_path,
+-- search_code, tree_refresh) on the game's DataModel.
+-- ============================================================
+
+local HttpService = game:GetService("HttpService")
+local ChangeHistoryService = game:GetService("ChangeHistoryService")
+local Selection = game:GetService("Selection")
+
+local plugin = plugin -- the Plugin instance this script runs under
+
+-- ------------------------------------------------------------
+-- Constants
+-- ------------------------------------------------------------
+local PORT_QUERY = "XTransformPort=3005"
+local POLL_WAIT_MS = 22000
+local MAX_TREE_NODES = 3000
+local MAX_SCAN_DEPTH = 40
+local MAX_LIST = 500
+local MAX_SEARCH_HITS = 200
+local MAX_SOURCE_CHARS = 300000
+local MAX_LOG_LINES = 60
+
+local SETTING_URL = "ZAI_serverUrl"
+local SETTING_WS_ID = "ZAI_workspaceId"
+local SETTING_WS_SECRET = "ZAI_workspaceSecret"
+
+-- Theme: "Obsidian & Emerald" — matches the bridge dashboard.
+local C = {
+	bg = Color3.fromRGB(10, 12, 14),
+	panel = Color3.fromRGB(16, 19, 23),
+	panel2 = Color3.fromRGB(23, 28, 34),
+	border = Color3.fromRGB(29, 35, 43),
+	text = Color3.fromRGB(198, 205, 212),
+	bright = Color3.fromRGB(238, 242, 245),
+	dim = Color3.fromRGB(139, 149, 160),
+	faint = Color3.fromRGB(91, 102, 112),
+	emerald = Color3.fromRGB(52, 211, 153),
+	emeraldDeep = Color3.fromRGB(16, 185, 129),
+	red = Color3.fromRGB(248, 113, 113),
+	yellow = Color3.fromRGB(251, 191, 36),
+	darkText = Color3.fromRGB(3, 35, 26),
+}
+
+-- ------------------------------------------------------------
+-- State
+-- ------------------------------------------------------------
+local sessionToken = nil
+local identity = nil -- { workspaceId, secret } persisted for reconnects
+local pairingCode = ""
+local placeName = ""
+local serviceOnline = false
+local dashboardPaired = false
+local polling = false
+local lastError = ""
+local logLines = {}
+local scriptWatchConns = {} -- [Instance] = RBXScriptConnection
+local changedScripts = {}   -- [Instance] = path (debounced activity)
+local treeDirty = false
+local busyScanning = false
+
+-- ------------------------------------------------------------
+-- Small helpers
+-- ------------------------------------------------------------
+local function log(msg)
+	local line = os.date("!%H:%M:%S") .. "  " .. tostring(msg)
+	logLines[#logLines + 1] = line
+	if #logLines > MAX_LOG_LINES then
+		table.remove(logLines, 1)
+	end
+	print("[Z.ai Bridge] " .. tostring(msg))
+end
+
+local function isoNow()
+	return os.date("!%Y-%m-%dT%H:%M:%SZ")
+end
+
+local function pathOf(inst)
+	local parts = {}
+	local cur = inst
+	while cur and cur ~= game do
+		table.insert(parts, 1, cur.Name)
+		cur = cur.Parent
+	end
+	return table.concat(parts, "/")
+end
+
+local function findChild(parent, name)
+	for _, ch in ipairs(parent:GetChildren()) do
+		if ch.Name == name then
+			return ch
+		end
+	end
+	-- case-insensitive fallback (humans type paths loosely)
+	local lower = string.lower(name)
+	for _, ch in ipairs(parent:GetChildren()) do
+		if string.lower(ch.Name) == lower then
+			return ch
+		end
+	end
+	return nil
+end
+
+local function resolve(pathStr)
+	if type(pathStr) ~= "string" or pathStr == "" or pathStr == "/" then
+		return game
+	end
+	local cur = game
+	for seg in string.gmatch(pathStr, "[^/]+") do
+		if not cur then
+			return nil
+		end
+		cur = findChild(cur, seg)
+	end
+	return cur
+end
+
+local function isScriptInst(inst)
+	return typeof(inst) == "Instance" and inst:IsA("LuaSourceContainer")
+end
+
+local function plainCount(s, sub)
+	local n, i = 0, 1
+	while true do
+		local p = string.find(s, sub, i, true)
+		if not p then
+			break
+		end
+		n = n + 1
+		i = p + #sub
+	end
+	return n
+end
+
+local function plainReplace(s, old, new, firstOnly)
+	local out = {}
+	local i = 1
+	local n = 0
+	while true do
+		local sPos, ePos = string.find(s, old, i, true)
+		if not sPos then
+			break
+		end
+		out[#out + 1] = string.sub(s, i, sPos - 1)
+		out[#out + 1] = new
+		i = ePos + 1
+		n = n + 1
+		if firstOnly then
+			break
+		end
+	end
+	out[#out + 1] = string.sub(s, i)
+	return table.concat(out), n
+end
+
+local function beginRecording(label)
+	local ok, rec = pcall(function()
+		return ChangeHistoryService:TryBeginRecording(label, nil)
+	end)
+	if ok and rec then
+		return rec
+	end
+	return nil
+end
+
+local function finishRecording(rec, commit)
+	if not rec then
+		return
+	end
+	pcall(function()
+		ChangeHistoryService:FinishRecording(rec, commit and Enum.FinishRecordingOperation.Commit or Enum.FinishRecordingOperation.Cancel)
+	end)
+end
+
+-- ------------------------------------------------------------
+-- HTTP
+-- ------------------------------------------------------------
+local uiUrlBox = nil -- forward-declared for endpoint()
+
+local function baseUrl()
+	if not uiUrlBox then
+		return ""
+	end
+	local u = string.gsub(uiUrlBox.Text or "", "^%s+", "")
+	u = string.gsub(u, "%s+$", "")
+	u = string.gsub(u, "/+$", "")
+	return u
+end
+
+local function endpoint(path)
+	local base = baseUrl()
+	if base == "" then
+		return nil
+	end
+	local sep = string.find(base, "?", 1, true) and "&" or "?"
+	return base .. path .. sep .. PORT_QUERY
+end
+
+local function post(path, payload)
+	local url = endpoint(path)
+	if not url then
+		return nil, "Set the dashboard URL first (the address this dashboard opens at)."
+	end
+	if not HttpService.HttpEnabled then
+		return nil, "HTTP requests are disabled — Game Settings > Security > enable 'Allow HTTP Requests', then reconnect."
+	end
+	local ok, res = pcall(function()
+		return HttpService:RequestAsync({
+			Url = url,
+			Method = "POST",
+			Headers = { ["Content-Type"] = "application/json" },
+			Body = HttpService:JSONEncode(payload),
+		})
+	end)
+	if not ok then
+		return nil, tostring(res)
+	end
+	if not res.Success then
+		local msg = "HTTP " .. tostring(res.StatusCode)
+		pcall(function()
+			local d = HttpService:JSONDecode(res.Body)
+			if d and d.error then
+				msg = msg .. ": " .. tostring(d.error)
+			end
+		end)
+		return nil, msg, res.StatusCode
+	end
+	local data = nil
+	local okDecode = pcall(function()
+		data = HttpService:JSONDecode(res.Body)
+	end)
+	if not okDecode then
+		return nil, "The bridge replied with unreadable data."
+	end
+	return data, nil
+end
+
+-- ------------------------------------------------------------
+-- Game scan — the DataModel as a workspace tree
+-- (mirrors the file tree the VS Code extension publishes)
+-- ------------------------------------------------------------
+local function watchScript(inst)
+	if not isScriptInst(inst) or scriptWatchConns[inst] then
+		return
+	end
+	local ok, conn = pcall(function()
+		return inst:GetPropertyChangedSignal("Source"):Connect(function()
+			if sessionToken then
+				changedScripts[inst] = pathOf(inst)
+				treeDirty = true
+			end
+		end)
+	end)
+	if ok and conn then
+		scriptWatchConns[inst] = conn
+	end
+end
+
+local function scanTree()
+	if busyScanning then
+		return nil, nil
+	end
+	busyScanning = true
+	local files, dirs, bytes = 0, 0, 0
+	local truncated = false
+	local root = {
+		name = placeName ~= "" and placeName or "Roblox Place",
+		path = "",
+		type = "dir",
+		class = "DataModel",
+		children = {},
+	}
+	local function walk(parentInst, parentNode, depth)
+		for _, child in ipairs(parentInst:GetChildren()) do
+			if files + dirs >= MAX_TREE_NODES then
+				truncated = true
+				break
+			end
+			local childPath = parentNode.path == "" and child.Name or (parentNode.path .. "/" .. child.Name)
+			local isScript = isScriptInst(child)
+			local srcLen = 0
+			if isScript then
+				local okSrc = pcall(function()
+					srcLen = #child.Source
+				end)
+				if okSrc then
+					bytes = bytes + srcLen
+				end
+				watchScript(child)
+			end
+			local kids = child:GetChildren()
+			local node = {
+				name = child.Name,
+				path = childPath,
+				class = child.ClassName,
+				script = isScript or nil,
+				size = srcLen > 0 and srcLen or nil,
+				type = "file",
+			}
+			if #kids > 0 then
+				node.type = "dir"
+				node.children = {}
+				dirs = dirs + 1
+				parentNode.children[#parentNode.children + 1] = node
+				if depth < MAX_SCAN_DEPTH then
+					walk(child, node, depth + 1)
+				end
+			else
+				files = files + 1
+				parentNode.children[#parentNode.children + 1] = node
+			end
+		end
+	end
+	pcall(function()
+		walk(game, root, 0)
+	end)
+	busyScanning = false
+	local stats = {
+		files = files,
+		dirs = dirs,
+		totalBytes = bytes,
+		nodes = files + dirs,
+		truncated = truncated,
+		scannedAt = isoNow(),
+	}
+	return root, stats
+end
+
+local function pushTree()
+	if not sessionToken then
+		return
+	end
+	local tree, stats = scanTree()
+	if not tree then
+		return
+	end
+	local data, err = post("/rbx/tree", { token = sessionToken, tree = tree, stats = stats })
+	if data and data.ok then
+		log("Game tree pushed — " .. tostring(stats.files) .. " leaves, " .. tostring(stats.dirs) .. " containers, " .. tostring(stats.nodes) .. " nodes.")
+	else
+		log("Tree push failed: " .. tostring(err))
+	end
+end
+
+local function pushActivity(entries)
+	if not sessionToken or #entries == 0 then
+		return
+	end
+	post("/rbx/activity", { token = sessionToken, entries = entries })
+end
+
+-- ------------------------------------------------------------
+-- Tool commands — the same tools the VS Code extension runs,
+-- executed on the game's DataModel instead of the file system.
+-- Every result mirrors the extension's {ok, result, meta} shape.
+-- ------------------------------------------------------------
+local function instanceSummary(inst)
+	local lines = {
+		"Instance: " .. inst.Name,
+		"Class: " .. inst.ClassName,
+		"Path: " .. pathOf(inst),
+	}
+	local candidates = {
+		"Value", "Position", "Size", "Anchored", "Material", "Color", "Transparency",
+		"CanCollide", "Massless", "Gravity", "TimeOfDay", "Brightness", "WalkSpeed",
+		"MaxHealth", "JumpPower", "PrimaryPart", "SoundId", "Volume", "Range",
+		"Damage", "Texture", "Shape", "FilterEnabled", "Archivable",
+	}
+	for _, prop in ipairs(candidates) do
+		if #lines >= 24 then
+			break
+		end
+		local ok, v = pcall(function()
+			return inst[prop]
+		end)
+		if ok and v ~= nil then
+			local t = typeof(v)
+			if t == "string" or t == "number" or t == "boolean" or t == "Vector3" or t == "Color3" or t == "BrickColor" then
+				local s = tostring(v)
+				if #s > 140 then
+					s = string.sub(s, 1, 140) .. "..."
+				end
+				lines[#lines + 1] = prop .. ": " .. s
+			end
+		end
+	end
+	local kids = inst:GetChildren()
+	if #kids > 0 then
+		lines[#lines + 1] = "Children (" .. #kids .. "):"
+		for i = 1, math.min(#kids, 12) do
+			lines[#lines + 1] = "  " .. kids[i].Name .. " (" .. kids[i].ClassName .. ")"
+		end
+		if #kids > 12 then
+			lines[#lines + 1] = "  ... +" .. (#kids - 12) .. " more"
+		end
+	end
+	return table.concat(lines, "\n")
+end
+
+local function cmdReadFile(args)
+	local p = tostring(args.path or "")
+	local inst = resolve(p)
+	if not inst then
+		return { ok = false, result = "File not found: " .. p }
+	end
+	if inst == game then
+		return { ok = false, result = "That is the game root — list files instead of reading it." }
+	end
+	if isScriptInst(inst) then
+		local okSrc, src = pcall(function()
+			return inst.Source or ""
+		end)
+		if not okSrc then
+			return { ok = false, result = "Could not read the script source: " .. tostring(src) }
+		end
+		if #src > MAX_SOURCE_CHARS then
+			return {
+				ok = true,
+				result = string.sub(src, 1, MAX_SOURCE_CHARS) .. "\n\n... [truncated: script has " .. #src .. " chars total]",
+				meta = { path = p, truncated = true, className = inst.ClassName, chars = #src },
+			}
+		end
+		local lineCount = select(2, string.gsub(src, "\n", ""))
+		return {
+			ok = true,
+			result = src,
+			meta = { path = p, chars = #src, className = inst.ClassName, lines = lineCount + 1 },
+		}
+	end
+	local summary = instanceSummary(inst)
+	return {
+		ok = true,
+		result = summary,
+		meta = { path = p, className = inst.ClassName, summary = true, chars = #summary },
+	}
+end
+
+local function cmdWriteFile(args)
+	local p = tostring(args.path or "")
+	local content = tostring(args.content or "")
+	if p == "" then
+		return { ok = false, result = "Missing path." }
+	end
+	local inst = resolve(p)
+	local rec = beginRecording("Z.ai Bridge: write " .. p)
+	if inst then
+		if isScriptInst(inst) then
+			inst.Source = content
+			finishRecording(rec, true)
+			pcall(function()
+				Selection:Set({ inst })
+			end)
+			treeDirty = true
+			return { ok = true, result = "Wrote " .. #content .. " chars to " .. p, meta = { path = p, chars = #content, className = inst.ClassName } }
+		end
+		finishRecording(rec, false)
+		return { ok = false, result = p .. " is a " .. inst.ClassName .. " — only scripts (Script / LocalScript / ModuleScript) have editable source." }
+	end
+	-- create a new script (mirrors write_file creating a file)
+	local parentPath, name = string.match(p, "^(.*)/([^/]+)$")
+	if not parentPath or parentPath == "" then
+		parentPath = "ServerScriptService"
+		name = p
+	end
+	local parent = resolve(parentPath)
+	if not parent then
+		finishRecording(rec, false)
+		return { ok = false, result = "Parent container not found: " .. parentPath }
+	end
+	local cls = "Script"
+	if string.match(name, "%.client$") then
+		cls = "LocalScript"
+		name = string.gsub(name, "%.client$", "")
+	elseif string.match(name, "%.module$") then
+		cls = "ModuleScript"
+		name = string.gsub(name, "%.module$", "")
+	end
+	name = string.gsub(name, "%.[Ll][Uu][Aa][Uu]?$", "")
+	name = string.gsub(name, "%.[Ll][Uu][Aa]$", "")
+	local s = Instance.new(cls)
+	s.Name = name
+	s.Source = content
+	s.Parent = parent
+	finishRecording(rec, true)
+	pcall(function()
+		Selection:Set({ s })
+	end)
+	treeDirty = true
+	return {
+		ok = true,
+		result = "Created " .. cls .. " \"" .. name .. "\" under " .. pathOf(parent) .. " (" .. #content .. " chars)",
+		meta = { path = p, chars = #content, className = cls, created = true },
+	}
+end
+
+local function cmdEditFile(args)
+	local p = tostring(args.path or "")
+	local oldStr = tostring(args.old_string or "")
+	local newStr = tostring(args.new_string or "")
+	local replaceAll = args.replace_all == true
+	if oldStr == "" then
+		return { ok = false, result = "old_string is empty — provide the exact text to replace." }
+	end
+	local inst = resolve(p)
+	if not inst then
+		return { ok = false, result = "File not found: " .. p }
+	end
+	if not isScriptInst(inst) then
+		return { ok = false, result = p .. " is a " .. inst.ClassName .. " — only scripts can be edited." }
+	end
+	local src = inst.Source or ""
+	local count = plainCount(src, oldStr)
+	if count == 0 then
+		return { ok = false, result = "old_string not found in " .. p, meta = { path = p } }
+	end
+	if count > 1 and not replaceAll then
+		return { ok = false, result = "old_string appears " .. count .. " times in " .. p .. " — make it unique or pass replace_all.", meta = { path = p, occurrences = count } }
+	end
+	local rec = beginRecording("Z.ai Bridge: edit " .. p)
+	local newSrc, n = plainReplace(src, oldStr, newStr, not replaceAll)
+	inst.Source = newSrc
+	finishRecording(rec, true)
+	treeDirty = true
+	local added = select(2, string.gsub(newStr, "\n", "")) + 1
+	local removed = select(2, string.gsub(oldStr, "\n", "")) + 1
+	return {
+		ok = true,
+		result = "Replaced " .. n .. " occurrence(s) in " .. p,
+		meta = { path = p, replaced = n, linesAdded = added, linesRemoved = removed, className = inst.ClassName },
+	}
+end
+
+local function cmdDeleteFile(args)
+	local p = tostring(args.path or "")
+	local inst = resolve(p)
+	if not inst then
+		return { ok = false, result = "File not found: " .. p }
+	end
+	if inst == game or inst.Parent == game then
+		return { ok = false, result = "Refusing to delete a top-level service (" .. p .. ")." }
+	end
+	local cls = inst.ClassName
+	local rec = beginRecording("Z.ai Bridge: delete " .. p)
+	inst:Destroy()
+	finishRecording(rec, true)
+	treeDirty = true
+	return { ok = true, result = "Deleted " .. p .. " (" .. cls .. ")", meta = { path = p, className = cls } }
+end
+
+local function cmdMovePath(args)
+	local from = tostring(args.from or "")
+	local to = tostring(args.to or "")
+	local inst = resolve(from)
+	if not inst then
+		return { ok = false, result = "Not found: " .. from }
+	end
+	if inst == game or inst.Parent == game then
+		return { ok = false, result = "Refusing to rename a top-level service (" .. from .. ")." }
+	end
+	local toParentPath, newName = string.match(to, "^(.*)/([^/]+)$")
+	if not newName then
+		return { ok = false, result = "Destination must be a path like Container/Name, got: " .. to }
+	end
+	local rec = beginRecording("Z.ai Bridge: move " .. from)
+	if toParentPath and toParentPath ~= "" then
+		local targetParent = resolve(toParentPath)
+		if targetParent and targetParent ~= inst.Parent then
+			inst.Parent = targetParent
+		end
+	end
+	inst.Name = newName
+	finishRecording(rec, true)
+	treeDirty = true
+	return { ok = true, result = "Moved " .. from .. " -> " .. to, meta = { fromPath = from } }
+end
+
+local function cmdListFiles(args)
+	local scope = tostring(args.path or "")
+	local maxN = tonumber(args.max_files) or 200
+	if maxN > MAX_LIST then
+		maxN = MAX_LIST
+	end
+	local rootInst = resolve(scope)
+	if not rootInst then
+		return { ok = false, result = "Path not found: " .. scope }
+	end
+	local lines = {}
+	local n = 0
+	local stack = { rootInst }
+	while #stack > 0 and n < maxN do
+		local cur = table.remove(stack)
+		for _, ch in ipairs(cur:GetChildren()) do
+			if n >= maxN then
+				break
+			end
+			n = n + 1
+			local hasKids = #ch:GetChildren() > 0
+			lines[#lines + 1] = pathOf(ch) .. (hasKids and "/" or "")
+			if hasKids then
+				stack[#stack + 1] = ch
+			end
+		end
+	end
+	local label = scope ~= "" and scope or (placeName ~= "" and placeName or "game")
+	local header = 'Workspace "' .. label .. '" — ' .. n .. ' entries'
+	return { ok = true, result = header .. "\n" .. table.concat(lines, "\n"), meta = { entries = n, scoped = scope ~= "" and scope or nil } }
+end
+
+local function cmdSearchCode(args)
+	local query = tostring(args.query or "")
+	if query == "" then
+		return { ok = false, result = "Missing query." }
+	end
+	local hits = 0
+	local out = {}
+	local descendants = game:GetDescendants()
+	for _, d in ipairs(descendants) do
+		if hits >= MAX_SEARCH_HITS then
+			break
+		end
+		if isScriptInst(d) then
+			local okSrc, src = pcall(function()
+				return d.Source or ""
+			end)
+			if okSrc then
+				local lineNo = 0
+				for line in string.gmatch(src, "[^\n]*") do
+					lineNo = lineNo + 1
+					if string.find(line, query, 1, true) then
+						hits = hits + 1
+						local trimmed = #line > 200 and string.sub(line, 1, 200) or line
+						out[#out + 1] = pathOf(d) .. ":" .. lineNo .. ": " .. trimmed
+						if hits >= MAX_SEARCH_HITS then
+							break
+						end
+					end
+				end
+			end
+		end
+	end
+	local resultText
+	if hits == 0 then
+		resultText = 'No matches for "' .. query .. '" across game scripts.'
+	else
+		resultText = table.concat(out, "\n")
+		if hits >= MAX_SEARCH_HITS then
+			resultText = resultText .. "\n... [truncated at " .. MAX_SEARCH_HITS .. " matches]"
+		end
+	end
+	return { ok = true, result = resultText, meta = { hits = hits, note = "plain-text search (regex not supported on the Roblox client)" } }
+end
+
+local function cmdTreeRefresh()
+	task.spawn(pushTree)
+	return { ok = true, result = "Rescanning the game — the fresh tree is being pushed." }
+end
+
+local function cmdUnsupported(args)
+	local name = tostring(args.__name or "tool")
+	return { ok = false, result = '"' .. name .. '" is not supported on the Roblox Studio workspace (no shell / OS access from Studio). Available: list_files, read_file, write_file, edit_file, delete_file, move_path, search_code.' }
+end
+
+local COMMANDS = {
+	read_file = cmdReadFile,
+	write_file = cmdWriteFile,
+	edit_file = cmdEditFile,
+	delete_file = cmdDeleteFile,
+	move_path = cmdMovePath,
+	list_files = cmdListFiles,
+	search_code = cmdSearchCode,
+	tree_refresh = cmdTreeRefresh,
+}
+
+local function handleCommand(ev)
+	local fn = COMMANDS[ev.name]
+	local ok, result
+	if fn then
+		ok, result = pcall(fn, ev.args or {})
+	else
+		ev.args = ev.args or {}
+		ev.args.__name = ev.name
+		ok, result = pcall(cmdUnsupported, ev.args)
+	end
+	if not ok then
+		result = { ok = false, result = "Plugin error: " .. tostring(result) }
+	end
+	result = result or { ok = false, result = "no result" }
+	task.spawn(function()
+		post("/rbx/result", {
+			token = sessionToken,
+			callId = ev.id,
+			ok = result.ok ~= false,
+			result = result.result or "",
+			meta = result.meta,
+		})
+	end)
+end
+
+-- ------------------------------------------------------------
+-- Session lifecycle
+-- ------------------------------------------------------------
+local function disconnect(opts)
+	opts = opts or {}
+	if sessionToken and not opts.silent then
+		pcall(function()
+			post("/rbx/unregister", { token = sessionToken })
+		end)
+	end
+	sessionToken = nil
+	serviceOnline = false
+	dashboardPaired = false
+end
+
+local function register()
+	local url = baseUrl()
+	if url == "" then
+		lastError = "Set the dashboard URL first."
+		log(lastError)
+		return false
+	end
+	if placeName == "" then
+		local ok, n = pcall(function()
+			return game.Name
+		end)
+		placeName = (ok and n ~= nil and n ~= "") and n or "Roblox Place"
+	end
+	local payload = {
+		placeName = placeName,
+		placeId = game.PlaceId,
+		studioVersion = "roblox-studio",
+	}
+	if identity then
+		payload.identity = identity
+	end
+	local data, err = post("/rbx/register", payload)
+	if not data then
+		lastError = tostring(err)
+		log("Register failed: " .. lastError)
+		serviceOnline = false
+		return false
+	end
+	if data.ok == false then
+		lastError = tostring(data.error or "rejected")
+		log("Register rejected: " .. lastError)
+		serviceOnline = false
+		return false
+	end
+	sessionToken = data.token
+	if data.workspaceId and data.secret then
+		identity = { workspaceId = data.workspaceId, secret = data.secret }
+		pcall(function()
+			plugin:SetSetting(SETTING_WS_ID, identity.workspaceId)
+			plugin:SetSetting(SETTING_WS_SECRET, identity.secret)
+		end)
+	end
+	if data.pairingCode then
+		pairingCode = tostring(data.pairingCode)
+	end
+	lastError = ""
+	serviceOnline = true
+	log("Connected" .. (data.persistent and " (persistent)" or "") .. " — pairing code " .. pairingCode)
+	return true
+end
+
+local function pollLoop()
+	if polling then
+		return
+	end
+	polling = true
+	task.spawn(function()
+		while sessionToken do
+			local token = sessionToken
+			local data, err = post("/rbx/poll", { token = token, waitMs = POLL_WAIT_MS })
+			if not sessionToken or sessionToken ~= token then
+				break
+			end
+			if not data then
+				serviceOnline = false
+				lastError = tostring(err)
+				if string.find(lastError, "unknown session", 1, true) then
+					-- service restarted or session evicted — re-register with the saved identity
+					log("Session lost — reconnecting...")
+					if register() then
+						task.wait(0.3)
+					else
+						task.wait(5)
+					end
+				else
+					task.wait(4)
+				end
+			elseif data.ok == false then
+				serviceOnline = false
+				lastError = tostring(data.error or "poll failed")
+				task.wait(4)
+			else
+				serviceOnline = true
+				lastError = ""
+				if data.status then
+					dashboardPaired = data.status.paired == true
+					if data.status.pairingCode then
+						pairingCode = tostring(data.status.pairingCode)
+					end
+				end
+				local events = data.events or {}
+				for _, ev in ipairs(events) do
+					if ev.type == "cmd" then
+						task.spawn(handleCommand, ev)
+					elseif ev.type == "evicted" then
+						log("Evicted: " .. tostring(ev.reason or "another client took over"))
+						disconnect({ silent = true })
+					end
+				end
+				task.wait(0.15)
+			end
+		end
+		polling = false
+	end)
+end
+
+local function connect()
+	if register() then
+		task.spawn(pushTree)
+		pollLoop()
+	else
+		disconnect({ silent = true })
+	end
+end
+
+-- ------------------------------------------------------------
+-- Studio watching — keep the dashboard's view of the game fresh
+-- ------------------------------------------------------------
+local function startWatchers()
+	game.DescendantAdded:Connect(function(inst)
+		if isScriptInst(inst) then
+			watchScript(inst)
+			if sessionToken then
+				task.spawn(pushActivity, { { kind = "fs", fsType = "created", path = pathOf(inst) } })
+			end
+			treeDirty = true
+		else
+			treeDirty = true
+		end
+	end)
+	game.DescendantRemoving:Connect(function(inst)
+		if scriptWatchConns[inst] then
+			scriptWatchConns[inst]:Disconnect()
+			scriptWatchConns[inst] = nil
+		end
+		changedScripts[inst] = nil
+		if isScriptInst(inst) then
+			if sessionToken then
+				task.spawn(pushActivity, { { kind = "fs", fsType = "deleted", path = pathOf(inst) } })
+			end
+			treeDirty = true
+		else
+			treeDirty = true
+		end
+	end)
+	-- debounced tree sync
+	task.spawn(function()
+		while true do
+			task.wait(4)
+			if treeDirty and sessionToken then
+				treeDirty = false
+				pushTree()
+			end
+		end
+	end)
+	-- debounced script-change activity
+	task.spawn(function()
+		while true do
+			task.wait(3)
+			if sessionToken then
+				local entries = {}
+				for _, path in pairs(changedScripts) do
+					entries[#entries + 1] = { kind = "fs", fsType = "changed", path = path }
+				end
+				if #entries > 0 then
+					changedScripts = {}
+					pushActivity(entries)
+				end
+			else
+				changedScripts = {}
+			end
+		end
+	end)
+end
+
+-- ------------------------------------------------------------
+-- UI — toolbar button + dock widget ("Obsidian & Emerald")
+-- ------------------------------------------------------------
+local function mk(class, props, parent)
+	local inst = Instance.new(class)
+	for k, v in pairs(props or {}) do
+		inst[k] = v
+	end
+	inst.Parent = parent
+	return inst
+end
+
+local function corner(r, parent)
+	return mk("UICorner", { CornerRadius = UDim.new(0, r or 6) }, parent)
+end
+
+local function stroke(color, parent)
+	return mk("UIStroke", { Color = color, Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, parent)
+end
+
+local toolbar = plugin:CreateToolbar("Z.ai")
+local button = toolbar:CreateButton("Z.ai Bridge", "Z.ai Workspace Bridge — pair this place with your dashboard", "")
+button.ClickableWhenViewportHidden = true
+
+local widget = plugin:CreateDockWidgetPluginGui(
+	"ZaiWorkspaceBridge",
+	DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Right, false, false, 420, 580, 360, 440)
+)
+widget.Title = "Z.ai Workspace Bridge"
+button.Click:Connect(function()
+	widget.Enabled = not widget.Enabled
+end)
+widget:BindToClose(function()
+	widget.Enabled = false
+end)
+
+local root = mk("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = C.bg, BorderSizePixel = 0 }, widget)
+mk("UIPadding", {
+	PaddingTop = UDim.new(0, 12), PaddingBottom = UDim.new(0, 12),
+	PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12),
+}, root)
+
+-- header
+local header = mk("Frame", { Size = UDim2.new(1, 0, 0, 44), BackgroundTransparency = 1 }, root)
+local headerDot = mk("Frame", {
+	Size = UDim2.fromOffset(8, 8), Position = UDim2.new(0, 0, 0, 5),
+	BackgroundColor3 = C.red, BorderSizePixel = 0,
+}, header)
+corner(99, headerDot)
+mk("TextLabel", {
+	Size = UDim2.new(1, -20, 0, 20), Position = UDim2.new(0, 16, 0, 0),
+	BackgroundTransparency = 1, Text = "Z.ai Workspace Bridge",
+	TextColor3 = C.bright, Font = Enum.Font.GothamBold, TextSize = 16, TextXAlignment = Enum.TextXAlignment.Left,
+}, header)
+mk("TextLabel", {
+	Size = UDim2.new(1, -20, 0, 14), Position = UDim2.new(0, 16, 0, 22),
+	BackgroundTransparency = 1, Text = "Roblox Studio client — same operation as the VS Code extension",
+	TextColor3 = C.dim, Font = Enum.Font.Gotham, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left,
+}, header)
+
+-- URL row
+local urlRow = mk("Frame", { Size = UDim2.new(1, 0, 0, 34), Position = UDim2.new(0, 0, 0, 52), BackgroundTransparency = 1 }, root)
+uiUrlBox = mk("TextBox", {
+	Size = UDim2.new(1, -96, 1, 0), BackgroundColor3 = C.panel, BorderSizePixel = 0,
+	TextColor3 = C.text, PlaceholderText = "https://your-dashboard-url",
+	PlaceholderColor3 = C.faint, Font = Enum.Font.Code, TextSize = 13, Text = "",
+	ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left,
+	ClipsDescendants = true,
+}, urlRow)
+mk("UIPadding", { PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10) }, uiUrlBox)
+corner(6, uiUrlBox)
+stroke(C.border, uiUrlBox)
+local connectBtn = mk("TextButton", {
+	Size = UDim2.fromOffset(88, 34), Position = UDim2.new(1, -88, 0, 0),
+	BackgroundColor3 = C.emeraldDeep, BorderSizePixel = 0,
+	Text = "Connect", TextColor3 = C.darkText, Font = Enum.Font.GothamBold, TextSize = 13,
+}, urlRow)
+corner(6, connectBtn)
+uiUrlBox.FocusLost:Connect(function(enter)
+	if enter then
+		connect()
+	else
+		pcall(function()
+			plugin:SetSetting(SETTING_URL, baseUrl())
+		end)
+	end
+end)
+connectBtn.MouseButton1Click:Connect(function()
+	pcall(function()
+		plugin:SetSetting(SETTING_URL, baseUrl())
+	end)
+	if sessionToken then
+		disconnect()
+		log("Disconnected.")
+	else
+		connect()
+	end
+end)
+
+-- status card
+local statusCard = mk("Frame", {
+	Size = UDim2.new(1, 0, 0, 96), Position = UDim2.new(0, 0, 0, 96),
+	BackgroundColor3 = C.panel, BorderSizePixel = 0,
+}, root)
+corner(8, statusCard)
+stroke(C.border, statusCard)
+local statusRows = {}
+local statusDefs = {
+	{ key = "service", label = "bridge service" },
+	{ key = "dashboard", label = "dashboard" },
+	{ key = "game", label = "game" },
+}
+for i, def in ipairs(statusDefs) do
+	local y = 10 + (i - 1) * 27
+	local dot = mk("Frame", {
+		Size = UDim2.fromOffset(7, 7), Position = UDim2.fromOffset(14, y + 5),
+		BackgroundColor3 = C.faint, BorderSizePixel = 0,
+	}, statusCard)
+	corner(99, dot)
+	mk("TextLabel", {
+		Size = UDim2.new(0, 110, 0, 16), Position = UDim2.fromOffset(30, y),
+		BackgroundTransparency = 1, Text = def.label, TextColor3 = C.dim,
+		Font = Enum.Font.Gotham, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
+	}, statusCard)
+	local value = mk("TextLabel", {
+		Size = UDim2.new(1, -160, 0, 16), Position = UDim2.new(0, 150, 0, y),
+		BackgroundTransparency = 1, Text = "—", TextColor3 = C.text,
+		Font = Enum.Font.Code, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Right,
+	}, statusCard)
+	statusRows[def.key] = { dot = dot, value = value }
+end
+
+-- pairing card
+local pairCard = mk("Frame", {
+	Size = UDim2.new(1, 0, 0, 104), Position = UDim2.new(0, 0, 0, 202),
+	BackgroundColor3 = C.panel, BorderSizePixel = 0,
+}, root)
+corner(8, pairCard)
+stroke(C.border, pairCard)
+mk("TextLabel", {
+	Size = UDim2.new(1, -28, 0, 14), Position = UDim2.fromOffset(14, 12),
+	BackgroundTransparency = 1, Text = "PAIRING CODE", TextColor3 = C.faint,
+	Font = Enum.Font.Gotham, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left,
+}, pairCard)
+local codeLabel = mk("TextLabel", {
+	Size = UDim2.new(1, -28, 0, 34), Position = UDim2.fromOffset(14, 28),
+	BackgroundTransparency = 1, Text = "------", TextColor3 = C.emerald,
+	Font = Enum.Font.Code, TextSize = 28, TextXAlignment = Enum.TextXAlignment.Center,
+}, pairCard)
+mk("TextLabel", {
+	Size = UDim2.new(1, -28, 0, 28), Position = UDim2.fromOffset(14, 66),
+	BackgroundTransparency = 1,
+	Text = "Type this code once into the dashboard's pair box to unlock it.",
+	TextColor3 = C.dim, Font = Enum.Font.Gotham, TextSize = 11,
+	TextXAlignment = Enum.TextXAlignment.Center, TextWrapped = true,
+}, pairCard)
+
+-- actions row
+local actionsRow = mk("Frame", { Size = UDim2.new(1, 0, 0, 32), Position = UDim2.new(0, 0, 0, 316), BackgroundTransparency = 1 }, root)
+local rescanBtn = mk("TextButton", {
+	Size = UDim2.new(1, 0, 1, 0), BackgroundColor3 = C.panel2, BorderSizePixel = 0,
+	Text = "Rescan game and push tree", TextColor3 = C.text, Font = Enum.Font.GothamMedium, TextSize = 12,
+}, actionsRow)
+corner(6, rescanBtn)
+stroke(C.border, rescanBtn)
+rescanBtn.MouseButton1Click:Connect(function()
+	if sessionToken then
+		task.spawn(pushTree)
+	else
+		log("Not connected — press Connect first.")
+	end
+end)
+
+-- error line
+local errorLabel = mk("TextLabel", {
+	Size = UDim2.new(1, 0, 0, 14), Position = UDim2.new(0, 0, 0, 354),
+	BackgroundTransparency = 1, Text = "", TextColor3 = C.red,
+	Font = Enum.Font.Gotham, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left,
+	TextTruncate = Enum.TextTruncate.AtEnd,
+}, root)
+
+-- log card
+local logCard = mk("Frame", {
+	Size = UDim2.new(1, 0, 1, -374), Position = UDim2.new(0, 0, 0, 374),
+	BackgroundColor3 = C.panel, BorderSizePixel = 0,
+}, root)
+corner(8, logCard)
+stroke(C.border, logCard)
+local logScroll = mk("ScrollingFrame", {
+	Size = UDim2.new(1, -20, 1, -20), Position = UDim2.fromOffset(10, 10),
+	BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 4,
+	AutomaticCanvasSize = Enum.AutomaticSize.Y, CanvasSize = UDim2.new(),
+	ScrollingDirection = Enum.ScrollingDirection.Y,
+}, logCard)
+mk("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }, logScroll)
+local logLabel = mk("TextLabel", {
+	Size = UDim2.new(1, 0, 0, 0), BackgroundTransparency = 1, Text = "",
+	TextColor3 = C.dim, Font = Enum.Font.Code, TextSize = 11,
+	TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+	TextWrapped = true, AutomaticSize = Enum.AutomaticSize.Y,
+}, logScroll)
+
+local function renderLog()
+	logLabel.Text = table.concat(logLines, "\n")
+	task.defer(function()
+		logScroll.CanvasPosition = Vector2.new(0, 1e6)
+	end)
+end
+
+local originalLog = log
+log = function(msg)
+	originalLog(msg)
+	renderLog()
+end
+
+local function renderStatus()
+	statusRows.service.dot.BackgroundColor3 = serviceOnline and C.emerald or C.red
+	statusRows.service.value.Text = serviceOnline and "online" or "offline"
+	statusRows.dashboard.dot.BackgroundColor3 = dashboardPaired and C.emerald or C.yellow
+	statusRows.dashboard.value.Text = dashboardPaired and "paired" or "unpaired"
+	statusRows.game.dot.BackgroundColor3 = sessionToken and C.emerald or C.faint
+	statusRows.game.value.Text = placeName ~= "" and placeName or "—"
+	codeLabel.Text = (sessionToken and pairingCode ~= "") and pairingCode or "------"
+	headerDot.BackgroundColor3 = sessionToken and C.emerald or C.red
+	connectBtn.Text = sessionToken and "Disconnect" or "Connect"
+	connectBtn.BackgroundColor3 = sessionToken and C.panel2 or C.emeraldDeep
+	connectBtn.TextColor3 = sessionToken and C.text or C.darkText
+	errorLabel.Text = lastError ~= "" and lastError or ""
+end
+
+-- periodic UI refresh (poll updates the state; render on a heartbeat)
+task.spawn(function()
+	while true do
+		task.wait(1)
+		renderStatus()
+	end
+end)
+
+-- ------------------------------------------------------------
+-- Boot
+-- ------------------------------------------------------------
+do
+	local savedUrl = plugin:GetSetting(SETTING_URL)
+	if type(savedUrl) == "string" and savedUrl ~= "" then
+		uiUrlBox.Text = savedUrl
+	end
+	local savedId = plugin:GetSetting(SETTING_WS_ID)
+	local savedSecret = plugin:GetSetting(SETTING_WS_SECRET)
+	if type(savedId) == "string" and type(savedSecret) == "string" and savedId ~= "" and savedSecret ~= "" then
+		identity = { workspaceId = savedId, secret = savedSecret }
+	end
+	startWatchers()
+	renderStatus()
+	log("Plugin loaded. Paste the dashboard URL and press Connect.")
+	if type(savedUrl) == "string" and savedUrl ~= "" then
+		task.delay(1, connect) -- auto-reconnect after Studio restarts
+	end
+end

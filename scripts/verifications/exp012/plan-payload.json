@@ -1,0 +1,126 @@
+{
+ "runId": "VRUN-000007",
+ "experiments": "Five sandbox-staged cases: four git experiments in mktemp scratch repos (selective restore, path-limited stash, banned-command negative control, mixed-file content capture) plus a local man-page documentation inspection of the installed git. V3 (continuation criteria) is process guidance per the record's own plan \u2014 not mechanically testable.",
+ "cases": [
+  {
+   "name": "V1a path-limited git restore: user WIP survives, agent edit gone, original error reproduces",
+   "objective": "verify the record's primary selective-rollback mechanism end to end in a scratch repo",
+   "category": "unit",
+   "command": "bash knowledge/verification/sandbox/VRUN-000007/v1a_restore_selective.sh",
+   "timeoutMs": 60000,
+   "expected": {
+    "expectedResult": "V1a-SELECTIVE-RESTORE-VERIFIED",
+    "successCriteria": "exit 0, user WIP intact, agent edit reverted, original error reproduced",
+    "failureCriteria": "user work lost, agent edit survives, or the check outcome changes"
+   },
+   "criteria": {
+    "exitCode": 0,
+    "outputContains": [
+     "V1a-SELECTIVE-RESTORE-VERIFIED"
+    ],
+    "outputNotContains": []
+   },
+   "flags": {
+    "critical": true,
+    "requiresNetwork": false,
+    "destructive": false
+   }
+  },
+  {
+   "name": "V1b path-limited stash: same guarantees, change recoverable",
+   "objective": "verify git stash push -- <path> as the alternative selective rollback",
+   "category": "unit",
+   "command": "bash knowledge/verification/sandbox/VRUN-000007/v1b_stash_pathlimited.sh",
+   "timeoutMs": 60000,
+   "expected": {
+    "expectedResult": "V1b-PATH-LIMITED-STASH-VERIFIED",
+    "successCriteria": "exit 0, user WIP intact, agent edit stashed (recoverable), original error reproduced",
+    "failureCriteria": "any guarantee broken"
+   },
+   "criteria": {
+    "exitCode": 0,
+    "outputContains": [
+     "V1b-PATH-LIMITED-STASH-VERIFIED"
+    ],
+    "outputNotContains": []
+   },
+   "flags": {
+    "critical": true,
+    "requiresNetwork": false,
+    "destructive": false
+   }
+  },
+  {
+   "name": "V1c negative control: repo-wide git checkout . destroys user work (why it is banned)",
+   "objective": "demonstrate the blast radius of the banned blanket restore on the user's unrelated uncommitted work",
+   "category": "negative",
+   "command": "bash knowledge/verification/sandbox/VRUN-000007/v1c_negative_checkout.sh",
+   "timeoutMs": 60000,
+   "expected": {
+    "expectedResult": "V1c-BLANKET-RESTORE-DAMAGE-CONFIRMED",
+    "successCriteria": "exit 0, user WIP destroyed by the banned command (damage demonstrated)",
+    "failureCriteria": "user work survives the blanket restore (the ban would be unjustified)"
+   },
+   "criteria": {
+    "exitCode": 0,
+    "outputContains": [
+     "V1c-BLANKET-RESTORE-DAMAGE-CONFIRMED"
+    ],
+    "outputNotContains": []
+   },
+   "flags": {
+    "critical": true,
+    "requiresNetwork": false,
+    "destructive": false
+   }
+  },
+  {
+   "name": "V1d mixed file: content-capture rollback preserves the user's hunk, removes the agent's",
+   "objective": "verify the record's prescribed mechanism when the agent's edit and the user's pre-existing WIP share one file (capture pre-edit content before the first edit, re-apply on failure)",
+   "category": "boundary",
+   "command": "bash knowledge/verification/sandbox/VRUN-000007/v1d_content_capture.sh",
+   "timeoutMs": 60000,
+   "expected": {
+    "expectedResult": "V1d-CONTENT-CAPTURE-ROLLBACK-VERIFIED",
+    "successCriteria": "exit 0, user hunk intact, agent hunk gone, working tree at exactly the user's WIP, original error reproduced",
+    "failureCriteria": "either hunk mishandled"
+   },
+   "criteria": {
+    "exitCode": 0,
+    "outputContains": [
+     "V1d-CONTENT-CAPTURE-ROLLBACK-VERIFIED"
+    ],
+    "outputNotContains": []
+   },
+   "flags": {
+    "critical": true,
+    "requiresNetwork": false,
+    "destructive": false
+   }
+  },
+  {
+   "name": "V2 doc-based: installed git's own man pages on restore/stash selectivity (local, no network)",
+   "objective": "verify against the ACTUAL documentation of the installed git 2.53.0: path-scoped working-tree restore, interactive hunk selection, stash push with pathspec",
+   "category": "validation",
+   "command": "bash knowledge/verification/sandbox/VRUN-000007/v2_git_docs.sh",
+   "timeoutMs": 60000,
+   "expected": {
+    "expectedResult": "V2-DOC-VERIFIED",
+    "successCriteria": "exit 0, all six documented phrases found in the local man pages",
+    "failureCriteria": "man pages unavailable or documented statements differ"
+   },
+   "criteria": {
+    "exitCode": 0,
+    "outputContains": [
+     "V2-DOC-VERIFIED"
+    ],
+    "outputNotContains": []
+   },
+   "flags": {
+    "critical": true,
+    "requiresNetwork": false,
+    "destructive": false
+   }
+  }
+ ]
+}

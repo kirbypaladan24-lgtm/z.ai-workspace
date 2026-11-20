@@ -55,3 +55,6 @@ server.log
 # BRIDGE RUNTIME STATE — workspace secret + web tokens live here.
 # NEVER commit this; the service regenerates it on first connect.
 mini-services/agent-service/data/
+
+# git bundles served for download from the dashboard (regenerated, never tracked)
+/public/*.bundle

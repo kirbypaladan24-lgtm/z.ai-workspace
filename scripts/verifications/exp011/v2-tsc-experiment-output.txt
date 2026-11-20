@@ -1,0 +1,16 @@
+V2 (record plan, VM-sandbox experiment): tsc type-check vs grep — supplementary evidence, executed in the Z.ai sandbox (tsc 5.9.3, socket.io-client 4.8.4), NOT on the user's machine (no node there).
+
+=== tsc --noEmit on positive.ts ===
+exit code: 0
+
+=== tsc --noEmit on negative-fabricated.ts ===
+scripts/verifications/exp011/tsc-scratch/negative-fabricated.ts(4,3): error TS2339: Property 'setReconnectionLag' does not exist on type 'Socket<DefaultEventsMap, DefaultEventsMap>'.
+exit code: 2
+
+=== tsc --noEmit on negative-shape.ts ===
+scripts/verifications/exp011/tsc-scratch/negative-shape.ts(4,3): error TS2554: Expected 2 arguments, but got 1.
+exit code: 2
+
+=== grep contrast: the REAL method name in the installed .d.ts ===
+grep -c 'on(' node_modules/socket.io-client/build/esm/socket.d.ts -> 11 occurrences
+=> grep confirms the name exists but cannot see the call-shape error; tsc catches BOTH the fabricated property (TS2339) and the wrong call shape (TS2554).

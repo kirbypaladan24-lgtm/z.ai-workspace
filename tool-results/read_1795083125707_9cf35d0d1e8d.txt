@@ -1,0 +1,1385 @@
+     1→/**
+     2→ * knowledge.ts — the Workspace Bridge Adaptive Intelligence layer (v1).
+     3→ *
+     4→ * A JSONL knowledge store that lives in the USER'S workspace (knowledge/
+     5→ * folder) and is synced through the connected VS Code extension. The
+     6→ * workspace is the single source of truth — copy the folder to migrate
+     7→ * every record, attempt, feedback and audit line to another machine.
+     8→ *
+     9→ * Lifecycle (plan §5, first-release subset):
+    10→ *   candidate → verification_pending → verified | rejected
+    11→ *   then: deprecated / archived (owner), deleted (soft)
+    12→ *   Failed attempts are separate records used as negative retrieval signal.
+    13→ *
+    14→ * Core principle (plan §1): GLM may PROPOSE knowledge; the bridge controls
+    15→ * verification, promotion and auditability. The operator (admin API) can
+    16→ * submit/attempt/feedback/propose/verify — but can never set "verified"
+    17→ * directly. Promotion happens ONLY through:
+    18→ *   a) the verification gate: checks executed BY THE SERVICE through the
+    19→ *      bridge tool layer (real exit codes captured from the extension), or
+    20→ *   b) explicit owner approval from the paired dashboard.
+    21→ *
+    22→ * Store files (workspace-relative):
+    23→ *   knowledge/experiences.jsonl   one experience per line (nested versions)
+    24→ *   knowledge/attempts.jsonl      unsuccessful attempts (negative signal)
+    25→ *   knowledge/feedback.jsonl      reuse feedback (worked / failed / incompatible)
+    26→ *   knowledge/audit.jsonl         append-only audit history
+    27→ *   knowledge/meta.json           schema version + ID counters
+    28→ *   knowledge/README.md           self-documentation (seeded once)
+    29→ */
+    30→
+    31→import { readFileSync, writeFileSync, mkdirSync } from 'fs';
+    32→import { join } from 'path';
+    33→
+    34→/* ------------------------------------------------------------------ */
+    35→/* Types                                                               */
+    36→/* ------------------------------------------------------------------ */
+    37→
+    38→export type KnowledgeScope = 'global' | 'project';
+    39→export type ExperienceStatus =
+    40→  | 'candidate'
+    41→  | 'verification_pending'
+    42→  | 'verified'
+    43→  | 'rejected'
+    44→  | 'deprecated'
+    45→  | 'archived';
+    46→export type VerificationStatus = 'pending' | 'passed' | 'failed' | 'unable_to_verify' | 'human_approved';
+    47→export type AttemptResult = 'failed' | 'partially_resolved' | 'unresolved';
+    48→export type FeedbackOutcome = 'worked' | 'failed' | 'incompatible';
+    49→
+    50→export interface EvidenceItem {
+    51→  ts: number;
+    52→  source: 'run_command' | 'owner';
+    53→  command?: string;
+    54→  exitCode?: number | null;
+    55→  timedOut?: boolean;
+    56→  summary: string;
+    57→  journalRef?: string;
+    58→  actor: string;
+    59→}
+    60→
+    61→export interface ExperienceVersion {
+    62→  version: number;
+    63→  createdBy: string;
+    64→  createdAt: string;
+    65→  symptoms: string;
+    66→  rootCause: string;
+    67→  solutionSteps: string;
+    68→  environment: string;
+    69→  applicableVersions: string;
+    70→  limitations: string;
+    71→  compatibilityNotes?: string;
+    72→  changeReason?: string;
+    73→  verificationStatus: VerificationStatus;
+    74→  verificationSummary: string;
+    75→  evidence: EvidenceItem[];
+    76→  supersedes?: number;
+    77→  /**
+    78→   * When this proposal ALSO corrected record-level fields (title /
+    79→   * problemSummary — e.g. to retract an unsupported superlative that lives
+    80→   * outside the versioned fields), the prior values are preserved here
+    81→   * verbatim. The revision never overwrites historical knowledge: v1's
+    82→   * wording stays inspectable on the version that caused the change.
+    83→   */
+    84→  recordFieldChanges?: {
+    85→    title?: { from: string; to: string };
+    86→    problemSummary?: { from: string; to: string };
+    87→  };
+    88→}
+    89→
+    90→export interface ExperienceRecord {
+    91→  id: string;
+    92→  scope: KnowledgeScope;
+    93→  projectId: string | null;
+    94→  category: string;
+    95→  title: string;
+    96→  problemSummary: string;
+    97→  status: ExperienceStatus;
+    98→  activeVersion: number;
+    99→  versions: ExperienceVersion[];
+   100→  reuseStats: { used: number; worked: number; failed: number };
+   101→  createdBy: string;
+   102→  createdAt: string;
+   103→  updatedAt: string;
+   104→  archivedAt: string | null;
+   105→  deletedAt: string | null;
+   106→}
+   107→
+   108→export interface AttemptRecord {
+   109→  id: string;
+   110→  experienceId: string | null;
+   111→  projectId: string | null;
+   112→  sessionId: string;
+   113→  problemSummary: string;
+   114→  approach: string;
+   115→  result: AttemptResult;
+   116→  failureReason: string;
+   117→  environment: string;
+   118→  createdAt: string;
+   119→}
+   120→
+   121→export interface FeedbackRecord {
+   122→  id: string;
+   123→  experienceId: string;
+   124→  experienceVersion: number;
+   125→  sessionId: string;
+   126→  outcome: FeedbackOutcome;
+   127→  notes: string;
+   128→  createdAt: string;
+   129→}
+   130→
+   131→export interface AuditRecord {
+   132→  id: string;
+   133→  ts: number;
+   134→  actor: string;
+   135→  operation: string;
+   136→  entityType: 'experience' | 'attempt' | 'feedback' | 'store';
+   137→  entityId: string;
+   138→  oldVersion: number | null;
+   139→  newVersion: number | null;
+   140→  reason: string;
+   141→}
+   142→
+   143→export interface KnowledgeCounts {
+   144→  verified: number;
+   145→  candidate: number;
+   146→  verificationPending: number;
+   147→  rejected: number;
+   148→  deprecated: number;
+   149→  archived: number;
+   150→  deleted: number;
+   151→  attempts: number;
+   152→  feedback: number;
+   153→  audit: number;
+   154→}
+   155→
+   156→export interface KnowledgeSummary {
+   157→  ok: boolean;
+   158→  online: boolean;
+   159→  syncedAt: number | null;
+   160→  note?: string;
+   161→  counts: KnowledgeCounts;
+   162→  projectName: string | null;
+   163→}
+   164→
+   165→export interface SearchHit {
+   166→  id: string;
+   167→  title: string;
+   168→  scope: KnowledgeScope;
+   169→  projectId: string | null;
+   170→  category: string;
+   171→  status: ExperienceStatus;
+   172→  activeVersion: number;
+   173→  score: number;
+   174→  problemSummary: string;
+   175→  solutionExcerpt: string;
+   176→  environment: string;
+   177→  applicableVersions: string;
+   178→  limitations: string;
+   179→  verificationStatus: VerificationStatus;
+   180→  verificationSummary: string;
+   181→  evidenceCount: number;
+   182→  reuseStats: { used: number; worked: number; failed: number };
+   183→  updatedAt: string;
+   184→  warning?: boolean;
+   185→}
+   186→
+   187→export interface SearchOutcome {
+   188→  ok: boolean;
+   189→  query: string;
+   190→  hits: SearchHit[];
+   191→  attemptWarnings: Array<{
+   192→    id: string;
+   193→    problemSummary: string;
+   194→    approach: string;
+   195→    failureReason: string;
+   196→    result: AttemptResult;
+   197→    createdAt: string;
+   198→    score: number;
+   199→  }>;
+   200→  note?: string;
+   201→  error?: string;
+   202→}
+   203→
+   204→export interface CheckSpec {
+   205→  command: string;
+   206→  timeoutMs?: number;
+   207→}
+   208→
+   209→/* Dependencies injected by index.ts (keeps this module decoupled). */
+   210→export interface KnowledgeDeps {
+   211→  /** Is the VS Code extension connected right now? */
+   212→  isOnline(): boolean;
+   213→  /** Stable project identifier (the workspace name) or null. */
+   214→  projectName(): string | null;
+   215→  /**
+   216→   * Run one verification check. MUST go through the journaled tool path so
+   217→   * evidence carries a real activity-journal reference and a real exit code
+   218→   * captured by the extension — the thing GLM cannot fabricate.
+   219→   */
+   220→  runCheck(command: string, timeoutMs?: number): Promise<{
+   221→    ok: boolean;
+   222→    exitCode: number | null;
+   223→    timedOut: boolean;
+   224→    result: string;
+   225→    entryId?: string;
+   226→  }>;
+   227→  /** Write one knowledge activity entry to the journal. */
+   228→  logKnowledge(e: {
+   229→    source: 'operator' | 'web' | 'system';
+   230→    actor: string;
+   231→    tool: string;
+   232→    ok?: boolean;
+   233→    result?: string;
+   234→    meta?: Record<string, unknown>;
+   235→  }): unknown;
+   236→  /** Push knowledge:state to every paired web client. */
+   237→  broadcastState(): void;
+   238→  /** Local cache directory (sandbox-side mirror, NOT the source of truth). */
+   239→  dataDir: string;
+   240→}
+   241→
+   242→/* ------------------------------------------------------------------ */
+   243→/* Constants                                                           */
+   244→/* ------------------------------------------------------------------ */
+   245→
+   246→const STORE_DIR = 'knowledge';
+   247→const FILES = {
+   248→  experiences: `${STORE_DIR}/experiences.jsonl`,
+   249→  attempts: `${STORE_DIR}/attempts.jsonl`,
+   250→  feedback: `${STORE_DIR}/feedback.jsonl`,
+   251→  audit: `${STORE_DIR}/audit.jsonl`,
+   252→  meta: `${STORE_DIR}/meta.json`,
+   253→  readme: `${STORE_DIR}/README.md`,
+   254→} as const;
+   255→
+   256→const SCHEMA_VERSION = 1;
+   257→const MAX_AUDIT_IN_MEMORY = 10_000;
+   258→const MAX_EVIDENCE_PER_VERSION = 40;
+   259→const MAX_ATTEMPT_WARNINGS = 3;
+   260→const MAX_SYNC_READ_CHARS = 1_400_000; // below the extension READ_CHAR_CAP
+   261→const DEFAULT_SEARCH_LIMIT = 5;
+   262→
+   263→const CATEGORIES = [
+   264→  'build-error', 'runtime-bug', 'config', 'dependency', 'tooling',
+   265→  'debugging-technique', 'pattern', 'setup', 'other',
+   266→] as const;
+   267→
+   268→/* High-confidence secret shapes — submitting these is BLOCKED (plan §13.8). */
+   269→const SECRET_BLOCK_PATTERNS: RegExp[] = [
+   270→  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
+   271→  /\b(?:sk|rk)-[A-Za-z0-9_-]{20,}\b/,
+   272→  /\bAKIA[0-9A-Z]{16}\b/,
+   273→  /\bghp_[A-Za-z0-9]{30,}\b/,
+   274→  /\bgho_[A-Za-z0-9]{30,}\b/,
+   275→  /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/,
+   276→  /\beyJ[A-Za-z0-9_-]{20,}\.eyJ[A-Za-z0-9_-]{20,}\b/,
+   277→];
+   278→/* Softer heuristic — allowed but flagged in the response + journal. */
+   279→const SECRET_WARN_RE = /\b(password|passwd|secret|api[_-]?key|access[_-]?token)\b\s*[:=]\s*\S+/i;
+   280→
+   281→/* ------------------------------------------------------------------ */
+   282→/* Module state                                                        */
+   283→/* ------------------------------------------------------------------ */
+   284→
+   285→interface StoreState {
+   286→  experiences: ExperienceRecord[];
+   287→  attempts: AttemptRecord[];
+   288→  feedback: FeedbackRecord[];
+   289→  audit: AuditRecord[];
+   290→  meta: { schemaVersion: number; counters: { exp: number; att: number; fbk: number; aud: number } };
+   291→  syncedAt: number | null;
+   292→  online: boolean;
+   293→  note?: string;
+   294→}
+   295→
+   296→function emptyStore(): StoreState {
+   297→  return {
+   298→    experiences: [],
+   299→    attempts: [],
+   300→    feedback: [],
+   301→    audit: [],
+   302→    meta: { schemaVersion: SCHEMA_VERSION, counters: { exp: 0, att: 0, fbk: 0, aud: 0 } },
+   303→    syncedAt: null,
+   304→    online: false,
+   305→  };
+   306→}
+   307→
+   308→let store: StoreState = emptyStore();
+   309→let deps: KnowledgeDeps | null = null;
+   310→let cacheFile = '';
+   311→let syncPromise: Promise<StoreState> | null = null;
+   312→let mutationChain: Promise<unknown> = Promise.resolve();
+   313→
+   314→/* ------------------------------------------------------------------ */
+   315→/* Small helpers                                                       */
+   316→/* ------------------------------------------------------------------ */
+   317→
+   318→function truncate(s: unknown, max: number): string {
+   319→  const v = String(s ?? '');
+   320→  return v.length <= max ? v : v.slice(0, max) + `… (${v.length} chars)`;
+   321→}
+   322→
+   323→function nowIso(): string {
+   324→  return new Date().toISOString();
+   325→}
+   326→
+   327→function tokenize(s: string): Set<string> {
+   328→  return new Set(
+   329→    String(s ?? '')
+   330→      .toLowerCase()
+   331→      .split(/[^a-z0-9+#.]+/)
+   332→      .filter((t) => t.length > 1),
+   333→  );
+   334→}
+   335→
+   336→/** 0.5 * Jaccard(doc, query) + 0.5 * fraction of query tokens covered. */
+   337→function textOverlap(queryTokens: Set<string>, doc: string): number {
+   338→  if (queryTokens.size === 0) return 0;
+   339→  const docTokens = tokenize(doc);
+   340→  if (docTokens.size === 0) return 0;
+   341→  let inter = 0;
+   342→  for (const t of queryTokens) if (docTokens.has(t)) inter++;
+   343→  const union = docTokens.size + queryTokens.size - inter;
+   344→  const jaccard = union > 0 ? inter / union : 0;
+   345→  const coverage = inter / queryTokens.size;
+   346→  return 0.5 * jaccard + 0.5 * coverage;
+   347→}
+   348→
+   349→function nextId(kind: 'exp' | 'att' | 'fbk' | 'aud'): string {
+   350→  const prefix = kind === 'exp' ? 'EXP' : kind === 'att' ? 'ATT' : kind === 'fbk' ? 'FBK' : 'AUD';
+   351→  const n = ++store.meta.counters[kind];
+   352→  return `${prefix}-${String(n).padStart(6, '0')}`;
+   353→}
+   354→
+   355→function findExperience(id: string): ExperienceRecord | undefined {
+   356→  return store.experiences.find((e) => e.id === id);
+   357→}
+   358→
+   359→function activeVersionOf(exp: ExperienceRecord): ExperienceVersion | undefined {
+   360→  return exp.versions.find((v) => v.version === exp.activeVersion);
+   361→}
+   362→
+   363→function scanSecrets(text: string): { blocked: boolean; warned: boolean } {
+   364→  const blocked = SECRET_BLOCK_PATTERNS.some((re) => re.test(text));
+   365→  const warned = !blocked && SECRET_WARN_RE.test(text);
+   366→  return { blocked, warned };
+   367→}
+   368→
+   369→/* ------------------------------------------------------------------ */
+   370→/* Local cache (sandbox mirror — the workspace store is the truth)     */
+   371→/* ------------------------------------------------------------------ */
+   372→
+   373→function persistLocalCache() {
+   374→  if (!cacheFile) return;
+   375→  try {
+   376→    mkdirSync(deps!.dataDir, { recursive: true });
+   377→    writeFileSync(cacheFile, JSON.stringify(store));
+   378→  } catch (e) {
+   379→    console.error('[knowledge] local cache save failed:', e);
+   380→  }
+   381→}
+   382→
+   383→function loadLocalCache() {
+   384→  try {
+   385→    const raw = JSON.parse(readFileSync(cacheFile, 'utf8')) as StoreState;
+   386→    if (raw && Array.isArray(raw.experiences) && Array.isArray(raw.attempts) && raw.meta) {
+   387→      store = {
+   388→        experiences: raw.experiences,
+   389→        attempts: raw.attempts,
+   390→        feedback: Array.isArray(raw.feedback) ? raw.feedback : [],
+   391→        audit: Array.isArray(raw.audit) ? raw.audit : [],
+   392→        meta: raw.meta,
+   393→        syncedAt: raw.syncedAt ?? null,
+   394→        online: false,
+   395→        note: 'loaded from local cache — re-syncs when the workspace connects',
+   396→      };
+   397→    }
+   398→  } catch {
+   399→    /* no cache yet — fresh start */
+   400→  }
+   401→}
+   402→
+   403→/* ------------------------------------------------------------------ */
+   404→/* Workspace file I/O (through the extension, NOT journaled per-file)  */
+   405→/* ------------------------------------------------------------------ */
+   406→
+   407→async function wsReadFile(path: string): Promise<{ ok: boolean; text: string; missing: boolean }> {
+   408→  // injected lazily to avoid a circular import at module scope
+   409→  const r = await rawExec('read_file', { path });
+   410→  if (r.ok) {
+   411→    let text = typeof (r as any).content === 'string' ? (r as any).content : String(r.result ?? '');
+   412→    if (!(r as any).content && text.startsWith(path)) {
+   413→      const idx = text.indexOf('):\n\n'); // strip the "<path> (size, N lines):" preamble
+   414→      if (idx > 0) text = text.slice(idx + 4);
+   415→    }
+   416→    if (text.length > MAX_SYNC_READ_CHARS) {
+   417→      return { ok: false, text: '', missing: false };
+   418→    }
+   419→    return { ok: true, text, missing: false };
+   420→  }
+   421→  const msg = String(r.result ?? '');
+   422→  return { ok: false, text: '', missing: /not (exist|found)|no such/i.test(msg) };
+   423→}
+   424→
+   425→async function wsWriteFile(path: string, content: string): Promise<boolean> {
+   426→  const r = await rawExec('write_file', { path, content });
+   427→  return r.ok;
+   428→}
+   429→
+   430→/* rawExec is set by index.ts via initKnowledge — the service owns the
+   431→ * extension socket; this module only borrows it for store sync writes. */
+   432→let rawExec: (name: 'read_file' | 'write_file', args: Record<string, unknown>) => Promise<{ ok: boolean; result: string; content?: string }> =
+   433→  async () => ({ ok: false, result: 'knowledge module not initialized' });
+   434→
+   435→/* ------------------------------------------------------------------ */
+   436→/* JSONL (de)serialization                                             */
+   437→/* ------------------------------------------------------------------ */
+   438→
+   439→function parseJsonl<T>(text: string): { items: T[]; badLines: number } {
+   440→  const items: T[] = [];
+   441→  let badLines = 0;
+   442→  for (const line of String(text ?? '').split('\n')) {
+   443→    const l = line.trim();
+   444→    if (!l) continue;
+   445→    try {
+   446→      items.push(JSON.parse(l) as T);
+   447→    } catch {
+   448→      badLines++;
+   449→    }
+   450→  }
+   451→  return { items, badLines };
+   452→}
+   453→
+   454→function toJsonl(items: unknown[]): string {
+   455→  return items.map((i) => JSON.stringify(i)).join('\n') + (items.length ? '\n' : '');
+   456→}
+   457→
+   458→/* ------------------------------------------------------------------ */
+   459→/* Audit + journal + broadcast                                         */
+   460→/* ------------------------------------------------------------------ */
+   461→
+   462→function audit(
+   463→  actor: string,
+   464→  operation: string,
+   465→  entityType: AuditRecord['entityType'],
+   466→  entityId: string,
+   467→  opts: { oldVersion?: number | null; newVersion?: number | null; reason?: string } = {},
+   468→): AuditRecord {
+   469→  const rec: AuditRecord = {
+   470→    id: nextId('aud'),
+   471→    ts: Date.now(),
+   472→    actor,
+   473→    operation,
+   474→    entityType,
+   475→    entityId,
+   476→    oldVersion: opts.oldVersion ?? null,
+   477→    newVersion: opts.newVersion ?? null,
+   478→    reason: truncate(opts.reason ?? '', 500),
+   479→  };
+   480→  store.audit.push(rec);
+   481→  if (store.audit.length > MAX_AUDIT_IN_MEMORY) {
+   482→    store.audit.splice(0, store.audit.length - MAX_AUDIT_IN_MEMORY);
+   483→  }
+   484→  // Every audit append must persist: audit.jsonl is append-only history, and
+   485→  // a line that exists only in memory is lost on restart. (This exact gap
+   486→  // dropped 9 propose audit lines on 2026-11-19 — see AUD-000036 in the
+   487→  // store. Call sites that also set dirty.audit are harmless duplicates.)
+   488→  dirty.audit = true;
+   489→  return rec;
+   490→}
+   491→
+   492→function journal(
+   493→  source: 'operator' | 'web' | 'system',
+   494→  actor: string,
+   495→  tool: string,
+   496→  ok: boolean,
+   497→  result: string,
+   498→  meta?: Record<string, unknown>,
+   499→) {
+   500→  deps?.logKnowledge({ source, actor, tool, ok, result: truncate(result, 1000), meta });
+   501→}
+   502→
+   503→/* Serialize mutations: one at a time, in order. */
+   504→function enqueue<T>(fn: () => Promise<T>): Promise<T> {
+   505→  const run = mutationChain.then(fn, fn);
+   506→  mutationChain = run.catch(() => undefined);
+   507→  return run;
+   508→}
+   509→
+   510→/* Dirty-collection tracking so a mutation only writes changed files. */
+   511→const dirty = { experiences: false, attempts: false, feedback: false, audit: false, meta: false };
+   512→
+   513→async function persistDirty(actor: string): Promise<{ ok: boolean; error?: string }> {
+   514→  /* No isOnline gate: bun realms can split the liveness flag from the live
+   515→   * socket. The writes themselves fail honestly when the workspace is truly
+   516→   * offline — that error is the real signal, not a cached flag. */
+   517→  if (!deps) {
+   518→    return { ok: false, error: 'module not initialized' };
+   519→  }
+   520→  const writes: Array<Promise<boolean>> = [];
+   521→  if (dirty.experiences) writes.push(wsWriteFile(FILES.experiences, toJsonl(store.experiences)));
+   522→  if (dirty.attempts) writes.push(wsWriteFile(FILES.attempts, toJsonl(store.attempts)));
+   523→  if (dirty.feedback) writes.push(wsWriteFile(FILES.feedback, toJsonl(store.feedback)));
+   524→  if (dirty.audit) writes.push(wsWriteFile(FILES.audit, toJsonl(store.audit)));
+   525→  if (dirty.meta) writes.push(wsWriteFile(FILES.meta, JSON.stringify(store.meta, null, 2)));
+   526→  const results = await Promise.all(writes);
+   527→  dirty.experiences = dirty.attempts = dirty.feedback = dirty.audit = dirty.meta = false;
+   528→  persistLocalCache();
+   529→  if (results.some((ok) => !ok)) {
+   530→    return { ok: false, error: 'writing the knowledge store to the workspace failed — retry the operation' };
+   531→  }
+   532→  void actor;
+   533→  return { ok: true };
+   534→}
+   535→
+   536→function markAllDirty() {
+   537→  dirty.experiences = dirty.attempts = dirty.feedback = dirty.audit = dirty.meta = true;
+   538→}
+   539→
+   540→/* ------------------------------------------------------------------ */
+   541→/* Sync — the workspace folder is the source of truth                  */
+   542→/* ------------------------------------------------------------------ */
+   543→
+   544→const STORE_README = `# Knowledge Store
+   545→
+   546→This folder is the shared, persistent engineering knowledge base of the
+   547→Workspace Bridge ("Adaptive Intelligence" layer). It is plain JSONL —
+   548→portable with the repo, versioned by git, and human-readable.
+   549→
+   550→| File              | Contents                                              |
+   551→|-------------------|-------------------------------------------------------|
+   552→| experiences.jsonl | One experience record per line (nested version array) |
+   553→| attempts.jsonl    | Unsuccessful attempts — negative retrieval signal     |
+   554→| feedback.jsonl    | Reuse feedback: worked / failed / incompatible        |
+   555→| audit.jsonl       | Append-only audit history (never edit or truncate)    |
+   556→| meta.json         | Schema version + ID counters (managed by the bridge)  |
+   557→
+   558→Lifecycle: candidate -> verification_pending -> verified | rejected,
+   559→then deprecated / archived / soft-deleted by the owner. A record only
+   560→becomes "verified" through the bridge's verification gate (checks run by
+   561→the service with real exit codes) or explicit owner approval on the
+   562→dashboard. Failed attempts are never shown as solutions — only warnings.
+   563→
+   564→Edit records on the dashboard (or via the bridge CLI). Avoid hand-editing
+   565→JSONL while the bridge is running; if you do, use "knowledge sync" after.
+   566→`;
+   567→
+   568→async function syncFromWorkspace(source: 'operator' | 'web' | 'system', actor: string): Promise<StoreState> {
+   569→  if (syncPromise) return syncPromise;
+   570→  syncPromise = (async () => {
+   571→    /* The WHOLE body runs inside try/finally: the offline early-return used
+   572→     * to skip the finally that clears syncPromise, poisoning every future
+   573→     * sync in this process with a cached "offline" result (web clients
+   574→     * reconnect faster than the extension after a restart — their connect
+   575→     * sync hit the offline branch first and the store never re-synced). */
+   576→    try {
+   577→    /* No isOnline gate: if the workspace is truly offline the meta read below
+   578→     * fails and the honest catch reports it. (A previous gate here poisoned
+   579→     * syncPromise with a cached "offline" result whenever web clients
+   580→     * reconnected faster than the extension after a restart.) */
+   581→    try {
+   582→      const meta = await wsReadFile(FILES.meta);
+   583→      if (meta.missing) {
+   584→        if (store.experiences.length > 0 || store.attempts.length > 0) {
+   585→          // folder lost on the workspace side but we hold a cache — self-heal
+   586→          markAllDirty();
+   587→          const w = await persistDirty(actor);
+   588→          await wsWriteFile(FILES.readme, STORE_README);
+   589→          store.note = w.ok ? 'knowledge folder was missing — cache re-published to the workspace' : 'knowledge folder missing and re-publish failed';
+   590→        } else {
+   591→          // fresh seed
+   592→          store.meta.counters = { exp: 0, att: 0, fbk: 0, aud: 0 };
+   593→          markAllDirty();
+   594→          await persistDirty(actor);
+   595→          await wsWriteFile(FILES.readme, STORE_README);
+   596→          store.note = 'knowledge folder created in the workspace — empty store seeded';
+   597→        }
+   598→      } else if (meta.ok) {
+   599→        const parsedMeta = JSON.parse(meta.text) as StoreState['meta'];
+   600→        if ((parsedMeta?.schemaVersion ?? 0) > SCHEMA_VERSION) {
+   601→          store.online = true;
+   602→          store.note = `workspace store schema v${parsedMeta.schemaVersion} is newer than this bridge (v${SCHEMA_VERSION}) — update the bridge before using knowledge`;
+   603→          deps?.broadcastState();
+   604→          return store;
+   605→        }
+   606→        const [exp, att, fbk, aud] = await Promise.all([
+   607→          wsReadFile(FILES.experiences),
+   608→          wsReadFile(FILES.attempts),
+   609→          wsReadFile(FILES.feedback),
+   610→          wsReadFile(FILES.audit),
+   611→        ]);
+   612→        const failures: string[] = [];
+   613→        const experiences = exp.ok ? parseJsonl<ExperienceRecord>(exp.text) : (failures.push('experiences'), null);
+   614→        const attempts = att.ok ? parseJsonl<AttemptRecord>(att.text) : (failures.push('attempts'), null);
+   615→        const feedback = fbk.ok ? parseJsonl<FeedbackRecord>(fbk.text) : (failures.push('feedback'), null);
+   616→        const auditRecs = aud.ok ? parseJsonl<AuditRecord>(aud.text) : (failures.push('audit'), null);
+   617→        store.experiences = experiences ? experiences.items : store.experiences;
+   618→        store.attempts = attempts ? attempts.items : store.attempts;
+   619→        store.feedback = feedback ? feedback.items : store.feedback;
+   620→        store.audit = auditRecs ? auditRecs.items.slice(-MAX_AUDIT_IN_MEMORY) : store.audit;
+   621→        store.meta = parsedMeta;
+   622→        store.syncedAt = Date.now();
+   623→        store.online = true;
+   624→        store.note =
+   625→          failures.length > 0 ? `some knowledge files could not be read (${failures.join(', ')}) — cached data kept for those collections` : undefined;
+   626→        // counters must never go backwards (protect IDs after hand edits)
+   627→        for (const e of store.experiences) {
+   628→          const n = parseInt(e.id?.slice(4) ?? '0', 10);
+   629→          if (Number.isFinite(n) && n > store.meta.counters.exp) store.meta.counters.exp = n;
+   630→        }
+   631→        for (const a of store.attempts) {
+   632→          const n = parseInt(a.id?.slice(4) ?? '0', 10);
+   633→          if (Number.isFinite(n) && n > store.meta.counters.att) store.meta.counters.att = n;
+   634→        }
+   635→        for (const f of store.feedback) {
+   636→          const n = parseInt(f.id?.slice(4) ?? '0', 10);
+   637→          if (Number.isFinite(n) && n > store.meta.counters.fbk) store.meta.counters.fbk = n;
+   638→        }
+   639→        for (const a of store.audit) {
+   640→          const n = parseInt(a.id?.slice(4) ?? '0', 10);
+   641→          if (Number.isFinite(n) && n > store.meta.counters.aud) store.meta.counters.aud = n;
+   642→        }
+   643→        persistLocalCache();
+   644→      } else {
+   645→        store.online = true;
+   646→        store.note = `could not read ${FILES.meta}: ${truncate(meta.text, 200)}`;
+   647→      }
+   648→      journal(source, actor, 'knowledge:sync', true,
+   649→        `Knowledge store synced with the workspace — ${store.experiences.length} experiences, ${store.attempts.length} attempts, ${store.audit.length} audit lines.`,
+   650→        { experiences: store.experiences.length, attempts: store.attempts.length, online: true });
+   651→      deps?.broadcastState();
+   652→      return store;
+   653→    } catch (e: unknown) {
+   654→      store.online = false;
+   655→      store.note = `sync failed: ${e instanceof Error ? e.message : String(e)}`;
+   656→      journal(source, actor, 'knowledge:sync', false, store.note);
+   657→      deps?.broadcastState();
+   658→      return store;
+   659→    }
+   660→    } finally {
+   661→      syncPromise = null;
+   662→    }
+   663→  })();
+   664→  return syncPromise;
+   665→}
+   666→
+   667→/* ------------------------------------------------------------------ */
+   668→/* Search + ranking (plan §7 — metadata + text scoring, no vectors v1) */
+   669→/* ------------------------------------------------------------------ */
+   670→
+   671→function statusWeight(s: ExperienceStatus): number {
+   672→  switch (s) {
+   673→    case 'verified': return 1.0;
+   674→    case 'candidate': return 0.4;
+   675→    case 'verification_pending': return 0.3;
+   676→    case 'rejected': return 0.15;
+   677→    case 'deprecated': return -0.4;
+   678→    case 'archived': return -1; // excluded below, kept for completeness
+   679→    default: return 0;
+   680→  }
+   681→}
+   682→
+   683→function recencyBoost(iso: string): number {
+   684→  const t = Date.parse(iso);
+   685→  if (!Number.isFinite(t)) return 0;
+   686→  const days = Math.max(0, (Date.now() - t) / 86_400_000);
+   687→  return 0.15 / (1 + days / 30);
+   688→}
+   689→
+   690→function reuseSuccessRate(r: { used: number; worked: number; failed: number }): number {
+   691→  if (r.used <= 0) return 0;
+   692→  return (r.worked - r.failed) / r.used; // -1 .. 1
+   693→}
+   694→
+   695→export interface SearchOptions {
+   696→  scope?: 'global' | 'project' | 'all';
+   697→  category?: string;
+   698→  limit?: number;
+   699→  includeRejected?: boolean;
+   700→  preflight?: boolean;
+   701→}
+   702→
+   703→function search(query: string, opts: SearchOptions, source: 'operator' | 'web' | 'system', actor: string): SearchOutcome {
+   704→  const q = String(query ?? '').trim();
+   705→  if (!q) return { ok: false, query: q, hits: [], attemptWarnings: [], error: 'empty query' };
+   706→
+   707→  const project = deps?.projectName() ?? null;
+   708→  const scopeFilter = opts.scope ?? 'all';
+   709→  const limit = Math.max(1, Math.min(20, opts.limit ?? DEFAULT_SEARCH_LIMIT));
+   710→  const qTokens = tokenize(q);
+   711→
+   712→  const hits: SearchHit[] = [];
+   713→  for (const exp of store.experiences) {
+   714→    if (exp.deletedAt) continue;
+   715→    if (exp.status === 'archived') continue;
+   716→    if (exp.scope === 'project' && project && exp.projectId && exp.projectId !== project) continue; // project isolation
+   717→    if (scopeFilter !== 'all' && exp.scope !== scopeFilter) continue;
+   718→    if (opts.category && exp.category !== opts.category) continue;
+   719→    if (exp.status === 'rejected' && !opts.includeRejected) continue;
+   720→
+   721→    const v = activeVersionOf(exp);
+   722→    if (!v) continue;
+   723→
+   724→    const text = [exp.title, exp.problemSummary, exp.category, v.symptoms, v.rootCause, v.solutionSteps].join(' \n ');
+   725→    const overlap = textOverlap(qTokens, text);
+   726→    if (overlap <= 0) continue; // relevance gate — never surface unrelated records
+   727→
+   728→    const scopeMatch = exp.scope === 'project' ? (exp.projectId === project ? 1 : 0) : 0.6;
+   729→    const score =
+   730→      3.0 * overlap +
+   731→      0.6 * scopeMatch +
+   732→      statusWeight(exp.status) +
+   733→      0.2 * reuseSuccessRate(exp.reuseStats) +
+   734→      recencyBoost(exp.updatedAt);
+   735→
+   736→    hits.push({
+   737→      id: exp.id,
+   738→      title: exp.title,
+   739→      scope: exp.scope,
+   740→      projectId: exp.projectId,
+   741→      category: exp.category,
+   742→      status: exp.status,
+   743→      activeVersion: exp.activeVersion,
+   744→      score: Math.round(score * 1000) / 1000,
+   745→      problemSummary: truncate(exp.problemSummary, 400),
+   746→      solutionExcerpt: truncate(v.solutionSteps, 600),
+   747→      environment: v.environment,
+   748→      applicableVersions: v.applicableVersions,
+   749→      limitations: v.limitations,
+   750→      verificationStatus: v.verificationStatus,
+   751→      verificationSummary: v.verificationSummary,
+   752→      evidenceCount: v.evidence.length,
+   753→      reuseStats: exp.reuseStats,
+   754→      updatedAt: exp.updatedAt,
+   755→      warning: exp.status === 'deprecated',
+   756→    });
+   757→  }
+   758→
+   759→  hits.sort((a, b) => b.score - a.score);
+   760→  const top = hits.slice(0, limit);
+   761→
+   762→  const attemptWarnings = store.attempts
+   763→    .filter((a) => !a.experienceId)
+   764→    .map((a) => ({
+   765→      rec: a,
+   766→      score: 3.0 * textOverlap(qTokens, [a.problemSummary, a.approach, a.failureReason].join(' \n ')),
+   767→    }))
+   768→    .filter((x) => x.score > 0.6)
+   769→    .sort((a, b) => b.score - a.score)
+   770→    .slice(0, MAX_ATTEMPT_WARNINGS)
+   771→    .map((x) => ({
+   772→      id: x.rec.id,
+   773→      problemSummary: truncate(x.rec.problemSummary, 300),
+   774→      approach: truncate(x.rec.approach, 300),
+   775→      failureReason: truncate(x.rec.failureReason, 300),
+   776→      result: x.rec.result,
+   777→      createdAt: x.rec.createdAt,
+   778→      score: Math.round(x.score * 1000) / 1000,
+   779→    }));
+   780→
+   781→  const note =
+   782→    top.length === 0 && attemptWarnings.length === 0
+   783→      ? 'no relevant knowledge found — proceed normally and do not invent prior experience'
+   784→      : undefined;
+   785→
+   786→  journal(source, actor, 'knowledge:' + (opts.preflight ? 'preflight' : 'search'), true,
+   787→    `${opts.preflight ? 'Experience preflight' : 'Knowledge search'} “${truncate(q, 120)}” → ${top.length} record(s)${attemptWarnings.length ? `, ${attemptWarnings.length} failed-attempt warning(s)` : ''}${note ? ` (${note})` : ''}.`,
+   788→    { query: truncate(q, 200), hits: top.map((h) => h.id), warnings: attemptWarnings.map((w) => w.id), preflight: !!opts.preflight });
+   789→
+   790→  return { ok: true, query: q, hits: top, attemptWarnings, note };
+   791→}
+   792→
+   793→/* ------------------------------------------------------------------ */
+   794→/* Submit / attempt / feedback (agent-writable surfaces)               */
+   795→/* ------------------------------------------------------------------ */
+   796→
+   797→export interface SubmitInput {
+   798→  scope?: KnowledgeScope;
+   799→  category?: string;
+   800→  title?: string;
+   801→  problemSummary?: string;
+   802→  symptoms?: string;
+   803→  rootCause?: string;
+   804→  solutionSteps?: string;
+   805→  environment?: string;
+   806→  applicableVersions?: string;
+   807→  limitations?: string;
+   808→}
+   809→
+   810→async function submitExperience(
+   811→  input: SubmitInput,
+   812→  source: 'operator' | 'web',
+   813→  actor: string,
+   814→  sessionId = 'z.ai-web',
+   815→): Promise<{ ok: boolean; id?: string; flagged?: boolean; error?: string }> {
+   816→  return enqueue(async () => {
+   817→    const title = String(input.title ?? '').trim();
+   818→    const problem = String(input.problemSummary ?? '').trim();
+   819→    const solution = String(input.solutionSteps ?? '').trim();
+   820→    if (!title || !problem || !solution) {
+   821→      return { ok: false, error: 'title, problemSummary and solutionSteps are required' };
+   822→    }
+   823→    const scope: KnowledgeScope = input.scope === 'project' ? 'project' : 'global';
+   824→    const category = CATEGORIES.includes((input.category ?? '') as typeof CATEGORIES[number]) ? input.category! : 'other';
+   825→
+   826→    const blob = [title, problem, solution, input.symptoms, input.rootCause, input.environment].join('\n');
+   827→    const secrets = scanSecrets(blob);
+   828→    if (secrets.blocked) {
+   829→      journal(source, actor, 'knowledge:submit', false,
+   830→        'Submission BLOCKED: the content matches a high-confidence secret pattern (private key / API token). Secrets must never be stored (plan §13.8).');
+   831→      return { ok: false, error: 'submission blocked: content appears to contain a secret (private key / API token) — remove it and resubmit' };
+   832→    }
+   833→
+   834→    const id = nextId('exp');
+   835→    const rec: ExperienceRecord = {
+   836→      id,
+   837→      scope,
+   838→      projectId: scope === 'project' ? deps?.projectName() ?? null : null,
+   839→      category,
+   840→      title: truncate(title, 300),
+   841→      problemSummary: truncate(problem, 2000),
+   842→      status: 'candidate',
+   843→      activeVersion: 1,
+   844→      versions: [
+   845→        {
+   846→          version: 1,
+   847→          createdBy: actor,
+   848→          createdAt: nowIso(),
+   849→          symptoms: truncate(input.symptoms ?? '', 2000),
+   850→          rootCause: truncate(input.rootCause ?? '', 2000),
+   851→          solutionSteps: truncate(solution, 6000),
+   852→          environment: truncate(input.environment ?? '', 1000),
+   853→          applicableVersions: truncate(input.applicableVersions ?? '', 500),
+   854→          limitations: truncate(input.limitations ?? '', 1000),
+   855→          verificationStatus: 'pending',
+   856→          verificationSummary: 'not verified yet — run knowledge verify with real checks, or approve on the dashboard',
+   857→          evidence: [],
+   858→        },
+   859→      ],
+   860→      reuseStats: { used: 0, worked: 0, failed: 0 },
+   861→      createdBy: actor,
+   862→      createdAt: nowIso(),
+   863→      updatedAt: nowIso(),
+   864→      archivedAt: null,
+   865→      deletedAt: null,
+   866→    };
+   867→    store.experiences.push(rec);
+   868→    audit(actor, 'experience_submit', 'experience', id, { reason: truncate(problem, 300) });
+   869→    dirty.experiences = true;
+   870→    dirty.meta = true;
+   871→    const w = await persistDirty(actor);
+   872→    journal(source, actor, 'knowledge:submit', w.ok,
+   873→      w.ok
+   874→        ? `Experience ${id} submitted as candidate${secrets.warned ? ' (⚠ possible secret-like text — review before promoting to global)' : ''}: “${truncate(title, 120)}”. ${w.ok ? `Saved to ${FILES.experiences}.` : ''}`
+   875→        : `Experience ${id} created in memory but NOT saved: ${w.error}`,
+   876→      { id, scope, category, flagged: secrets.warned || undefined, saved: w.ok });
+   877→    deps?.broadcastState();
+   878→    return { ok: w.ok, id, flagged: secrets.warned || undefined, error: w.ok ? undefined : w.error };
+   879→  });
+   880→}
+   881→
+   882→export interface AttemptInput {
+   883→  problemSummary?: string;
+   884→  approach?: string;
+   885→  result?: AttemptResult;
+   886→  failureReason?: string;
+   887→  environment?: string;
+   888→  experienceId?: string;
+   889→}
+   890→
+   891→async function recordAttempt(
+   892→  input: AttemptInput,
+   893→  source: 'operator' | 'web',
+   894→  actor: string,
+   895→  sessionId = 'z.ai-web',
+   896→): Promise<{ ok: boolean; id?: string; error?: string }> {
+   897→  return enqueue(async () => {
+   898→    const problem = String(input.problemSummary ?? '').trim();
+   899→    const approach = String(input.approach ?? '').trim();
+   900→    if (!problem || !approach) {
+   901→      return { ok: false, error: 'problemSummary and approach are required' };
+   902→    }
+   903→    const result: AttemptResult =
+   904→      input.result === 'partially_resolved' || input.result === 'unresolved' ? input.result : 'failed';
+   905→    const id = nextId('att');
+   906→    const rec: AttemptRecord = {
+   907→      id,
+   908→      experienceId: input.experienceId && findExperience(input.experienceId) ? input.experienceId : null,
+   909→      projectId: deps?.projectName() ?? null,
+   910→      sessionId,
+   911→      problemSummary: truncate(problem, 2000),
+   912→      approach: truncate(approach, 4000),
+   913→      result,
+   914→      failureReason: truncate(input.failureReason ?? '', 2000),
+   915→      environment: truncate(input.environment ?? '', 1000),
+   916→      createdAt: nowIso(),
+   917→    };
+   918→    store.attempts.push(rec);
+   919→    audit(actor, 'attempt_record', 'attempt', id, { reason: truncate(problem, 300) });
+   920→    dirty.attempts = true;
+   921→    dirty.meta = true;
+   922→    const w = await persistDirty(actor);
+   923→    journal(source, actor, 'knowledge:attempt', w.ok,
+   924→      w.ok ? `Unsuccessful attempt ${id} recorded — future sessions retrieve it as a warning, not a solution.` : `Attempt ${id} NOT saved: ${w.error}`,
+   925→      { id, result, saved: w.ok });
+   926→    deps?.broadcastState();
+   927→    return { ok: w.ok, id, error: w.error };
+   928→  });
+   929→}
+   930→
+   931→export interface FeedbackInput {
+   932→  experienceId?: string;
+   933→  outcome?: FeedbackOutcome;
+   934→  notes?: string;
+   935→}
+   936→
+   937→async function recordFeedback(
+   938→  input: FeedbackInput,
+   939→  source: 'operator' | 'web',
+   940→  actor: string,
+   941→  sessionId = 'z.ai-web',
+   942→): Promise<{ ok: boolean; id?: string; error?: string }> {
+   943→  return enqueue(async () => {
+   944→    const exp = findExperience(String(input.experienceId ?? ''));
+   945→    if (!exp) return { ok: false, error: `unknown experience "${input.experienceId}"` };
+   946→    const outcome: FeedbackOutcome =
+   947→      input.outcome === 'failed' || input.outcome === 'incompatible' ? input.outcome : 'worked';
+   948→    const id = nextId('fbk');
+   949→    store.feedback.push({
+   950→      id,
+   951→      experienceId: exp.id,
+   952→      experienceVersion: exp.activeVersion,
+   953→      sessionId,
+   954→      outcome,
+   955→      notes: truncate(input.notes ?? '', 1000),
+   956→      createdAt: nowIso(),
+   957→    });
+   958→    exp.reuseStats.used += 1;
+   959→    if (outcome === 'worked') exp.reuseStats.worked += 1;
+   960→    if (outcome === 'failed') exp.reuseStats.failed += 1;
+   961→    exp.updatedAt = nowIso();
+   962→    audit(actor, 'experience_feedback', 'feedback', id, {
+   963→      reason: `${outcome} for ${exp.id} v${exp.activeVersion}`,
+   964→    });
+   965→    dirty.feedback = true;
+   966→    dirty.experiences = true;
+   967→    dirty.meta = true;
+   968→    const w = await persistDirty(actor);
+   969→    journal(source, actor, 'knowledge:feedback', w.ok,
+   970→      w.ok ? `Reuse feedback recorded for ${exp.id} v${exp.activeVersion}: ${outcome}.` : `Feedback NOT saved: ${w.error}`,
+   971→      { id, experienceId: exp.id, outcome, saved: w.ok });
+   972→    deps?.broadcastState();
+   973→    return { ok: w.ok, id, error: w.error };
+   974→  });
+   975→}
+   976→
+   977→/* ------------------------------------------------------------------ */
+   978→/* Verification gate + promotion (plan §5.1, §5.2)                     */
+   979→/* ------------------------------------------------------------------ */
+   980→
+   981→export interface VerifyOutcome {
+   982→  ok: boolean;
+   983→  id?: string;
+   984→  version?: number;
+   985→  promoted?: boolean;
+   986→  verificationStatus?: VerificationStatus;
+   987→  checks?: Array<{ command: string; exitCode: number | null; timedOut: boolean; passed: boolean; journalRef?: string }>;
+   988→  error?: string;
+   989→}
+   990→
+   991→async function verifyExperience(
+   992→  id: string,
+   993→  checks: CheckSpec[],
+   994→  source: 'operator' | 'web',
+   995→  actor: string,
+   996→  versionOverride?: number,
+   997→): Promise<VerifyOutcome> {
+   998→  return enqueue(async () => {
+   999→    const exp = findExperience(id);
+  1000→    if (!exp) return { ok: false, error: `unknown experience "${id}"` };
+  1001→    const list = (checks ?? []).filter((c) => c && String(c.command ?? '').trim());
+  1002→    if (list.length === 0) {
+  1003→      return { ok: false, error: 'at least one check command is required — a successful exit code alone is not evidence unless it exercises the original failure' };
+  1004→    }
+  1005→    if (!deps) {
+  1006→      return { ok: false, error: 'knowledge module not initialized' };
+  1007→    }
+  1008→    const version = exp.versions.find((v) => v.version === (versionOverride ?? exp.activeVersion));
+  1009→    if (!version) return { ok: false, error: `version ${versionOverride ?? exp.activeVersion} not found on ${id}` };
+  1010→
+  1011→    // capture the ORIGINAL state before the pending transition — the
+  1012→    // fail/pass branches below must reason about pre-verification trust
+  1013→    const originalStatus = exp.status;
+  1014→    const originalActive = exp.activeVersion;
+  1015→    const wasActiveVerified = originalStatus === 'verified' && originalActive === version.version;
+  1016→    const otherTrustedActive = originalStatus === 'verified' && originalActive !== version.version;
+  1017→    exp.status = 'verification_pending';
+  1018→    exp.updatedAt = nowIso();
+  1019→    dirty.experiences = true;
+  1020→    await persistDirty(actor);
+  1021→
+  1022→    const results: VerifyOutcome['checks'] = [];
+  1023→    let allPassed = true;
+  1024→    let anyUnable = false;
+  1025→    for (const c of list) {
+  1026→      const r = await deps.runCheck(c.command, c.timeoutMs);
+  1027→      const passed = r.ok && !r.timedOut && r.exitCode === 0;
+  1028→      if (r.timedOut || r.exitCode === null) anyUnable = true;
+  1029→      else if (!passed) allPassed = false;
+  1030→      results.push({ command: c.command, exitCode: r.exitCode, timedOut: r.timedOut, passed, journalRef: r.entryId });
+  1031→      version.evidence.push({
+  1032→        ts: Date.now(),
+  1033→        source: 'run_command',
+  1034→        command: truncate(c.command, 500),
+  1035→        exitCode: r.exitCode,
+  1036→        timedOut: r.timedOut,
+  1037→        summary: truncate(r.result, 400),
+  1038→        journalRef: r.entryId,
+  1039→        actor,
+  1040→      });
+  1041→    }
+  1042→    if (version.evidence.length > MAX_EVIDENCE_PER_VERSION) {
+  1043→      version.evidence.splice(0, version.evidence.length - MAX_EVIDENCE_PER_VERSION);
+  1044→    }
+  1045→
+  1046→    let promoted = false;
+  1047→    let verificationStatus: VerificationStatus;
+  1048→    if (anyUnable && allPassed) {
+  1049→      verificationStatus = 'unable_to_verify';
+  1050→      version.verificationStatus = 'unable_to_verify';
+  1051→      version.verificationSummary = `${results.length} check(s) ran but at least one produced no usable exit code (timeout / spawn failure) — NOT promoted`;
+  1052→      // honest uncertainty: the verified target stays pending; a proposal that
+  1053→      // could not be verified never demotes its trusted active version
+  1054→      exp.status = otherTrustedActive ? 'verified' : 'verification_pending';
+  1055→    } else if (allPassed) {
+  1056→      verificationStatus = 'passed';
+  1057→      version.verificationStatus = 'passed';
+  1058→      version.verificationSummary = `verification gate PASSED — ${results.length} check(s) executed by the bridge on the workspace, all exit 0 (evidence refs: ${results.map((r) => r.journalRef ?? '?').join(', ')})`;
+  1059→      exp.activeVersion = version.version;
+  1060→      exp.status = 'verified';
+  1061→      promoted = true;
+  1062→      audit(actor, 'experience_promote', 'experience', exp.id, {
+  1063→        oldVersion: originalActive,
+  1064→        newVersion: version.version,
+  1065→        reason: 'verification gate: all checks exit 0',
+  1066→      });
+  1067→    } else {
+  1068→      verificationStatus = 'failed';
+  1069→      version.verificationStatus = 'failed';
+  1070→      version.verificationSummary = `verification gate FAILED — ${results.filter((r) => !r.passed).length}/${results.length} check(s) did not pass`;
+  1071→      if (wasActiveVerified) {
+  1072→        // the ACTIVE version of a verified record failed re-verification —
+  1073→        // honest demotion: no longer recommended (plan §5 state table)
+  1074→        exp.status = 'deprecated';
+  1075→      } else if (otherTrustedActive) {
+  1076→        // a PROPOSAL failed while a different version stays trusted —
+  1077→        // the trusted version remains active and verified (plan §16)
+  1078→        exp.status = 'verified';
+  1079→      } else {
+  1080→        exp.status = 'rejected'; // candidate rejected by evidence
+  1081→      }
+  1082→    }
+  1083→    exp.updatedAt = nowIso();
+  1084→    dirty.experiences = true;
+  1085→    dirty.audit = true;
+  1086→    const w = await persistDirty(actor);
+  1087→    journal(source, actor, 'knowledge:verify', w.ok && verificationStatus !== 'failed',
+  1088→      `${exp.id} v${version.version} verification ${verificationStatus.toUpperCase()}${promoted ? ' → PROMOTED to verified' : ''}: ${results.map((r) => `exit ${r.exitCode ?? 'n/a'}`).join(', ')}.${w.ok ? '' : ` (⚠ store save failed: ${w.error})`}`,
+  1089→      { id: exp.id, version: version.version, verificationStatus, promoted, checks: results, saved: w.ok });
+  1090→    deps?.broadcastState();
+  1091→    return { ok: w.ok, id: exp.id, version: version.version, promoted, verificationStatus, checks: results, error: w.error };
+  1092→  });
+  1093→}
+  1094→
+  1095→/* ------------------------------------------------------------------ */
+  1096→/* Improvement proposals (plan §9)                                     */
+  1097→/* ------------------------------------------------------------------ */
+  1098→
+  1099→export interface ProposalInput {
+  1100→  solutionSteps?: string;
+  1101→  symptoms?: string;
+  1102→  rootCause?: string;
+  1103→  environment?: string;
+  1104→  applicableVersions?: string;
+  1105→  limitations?: string;
+  1106→  compatibilityNotes?: string;
+  1107→  reason?: string;
+  1108→  /**
+  1109→   * Optional corrections of RECORD-LEVEL metadata (title / problemSummary).
+  1110→   * Used when a technical review retracts a claim that lives outside the
+  1111→   * versioned fields. The original values are snapshotted verbatim into the
+  1112→   * new version's recordFieldChanges before the record is updated — the
+  1113→   * active pointer still does not move until the proposal passes the gate.
+  1114→   */
+  1115→  title?: string;
+  1116→  problemSummary?: string;
+  1117→}
+  1118→
+  1119→async function proposeImprovement(
+  1120→  id: string,
+  1121→  input: ProposalInput,
+  1122→  source: 'operator' | 'web',
+  1123→  actor: string,
+  1124→): Promise<{ ok: boolean; id?: string; proposedVersion?: number; error?: string }> {
+  1125→  return enqueue(async () => {
+  1126→    const exp = findExperience(id);
+  1127→    if (!exp) return { ok: false, error: `unknown experience "${id}"` };
+  1128→    const solution = String(input.solutionSteps ?? '').trim();
+  1129→    const reason = String(input.reason ?? '').trim();
+  1130→    if (!solution || !reason) return { ok: false, error: 'solutionSteps and reason are required' };
+  1131→
+  1132→    const secrets = scanSecrets(solution + reason);
+  1133→    if (secrets.blocked) {
+  1134→      return { ok: false, error: 'proposal blocked: content appears to contain a secret (private key / API token)' };
+  1135→    }
+  1136→
+  1137→    const maxV = exp.versions.reduce((m, v) => Math.max(m, v.version), 0);
+  1138→    const proposedVersion = maxV + 1;
+  1139→    const previousActive = exp.activeVersion;
+  1140→
+  1141→    // Record-level corrections (title / problemSummary) are snapshotted BEFORE
+  1142→    // the record is touched, so the prior wording survives verbatim on the
+  1143→    // version that caused the change (plan §9: revisions, never overwrites).
+  1144→    const newTitle = String(input.title ?? '').trim();
+  1145→    const newProblem = String(input.problemSummary ?? '').trim();
+  1146→    const recordFieldChanges: NonNullable<ExperienceVersion['recordFieldChanges']> = {};
+  1147→    if (newTitle && newTitle !== exp.title) {
+  1148→      recordFieldChanges.title = { from: exp.title, to: truncate(newTitle, 300) };
+  1149→    }
+  1150→    if (newProblem && newProblem !== exp.problemSummary) {
+  1151→      recordFieldChanges.problemSummary = { from: exp.problemSummary, to: truncate(newProblem, 2000) };
+  1152→    }
+  1153→    const revisedRecordFields = Object.keys(recordFieldChanges);
+  1154→
+  1155→    exp.versions.push({
+  1156→      version: proposedVersion,
+  1157→      createdBy: actor,
+  1158→      createdAt: nowIso(),
+  1159→      symptoms: truncate(input.symptoms ?? activeVersionOf(exp)?.symptoms ?? '', 2000),
+  1160→      rootCause: truncate(input.rootCause ?? activeVersionOf(exp)?.rootCause ?? '', 2000),
+  1161→      solutionSteps: truncate(solution, 6000),
+  1162→      environment: truncate(input.environment ?? activeVersionOf(exp)?.environment ?? '', 1000),
+  1163→      applicableVersions: truncate(input.applicableVersions ?? activeVersionOf(exp)?.applicableVersions ?? '', 500),
+  1164→      limitations: truncate(input.limitations ?? '', 1000),
+  1165→      compatibilityNotes: truncate(input.compatibilityNotes ?? '', 1000),
+  1166→      changeReason: truncate(reason, 1000),
+  1167→      verificationStatus: 'pending',
+  1168→      verificationSummary: 'proposal awaiting verification — the currently active version stays trusted until this passes the gate',
+  1169→      evidence: [],
+  1170→      supersedes: previousActive,
+  1171→      ...(revisedRecordFields.length > 0 ? { recordFieldChanges } : {}),
+  1172→    });
+  1173→    // Apply the record-level corrections only after the snapshot is stored.
+  1174→    if (recordFieldChanges.title) exp.title = recordFieldChanges.title.to;
+  1175→    if (recordFieldChanges.problemSummary) exp.problemSummary = recordFieldChanges.problemSummary.to;
+  1176→    // The active pointer does NOT move yet. A previously rejected/deprecated
+  1177→    // record becomes a candidate again; a verified one stays verified (v-old).
+  1178→    if (exp.status === 'rejected' || exp.status === 'deprecated') exp.status = 'candidate';
+  1179→    exp.updatedAt = nowIso();
+  1180→    audit(actor, 'experience_propose', 'experience', exp.id, {
+  1181→      oldVersion: previousActive,
+  1182→      newVersion: proposedVersion,
+  1183→      reason: truncate(reason + (revisedRecordFields.length > 0 ? ` [record-level fields revised, originals preserved on v${proposedVersion}: ${revisedRecordFields.join(', ')}]` : ''), 300),
+  1184→    });
+  1185→    dirty.experiences = true;
+  1186→    dirty.meta = true;
+  1187→    const w = await persistDirty(actor);
+  1188→    journal(source, actor, 'knowledge:propose', w.ok,
+  1189→      w.ok
+  1190→        ? `Improvement proposal for ${exp.id} stored as version ${proposedVersion} (supersedes v${previousActive}).${revisedRecordFields.length > 0 ? ` Record-level field(s) corrected with originals preserved on v${proposedVersion}: ${revisedRecordFields.join(', ')}.` : ''} The active version stays v${exp.activeVersion} until the proposal passes verification.`
+  1191→        : `Proposal for ${exp.id} NOT saved: ${w.error}`,
+  1192→      { id: exp.id, proposedVersion, activeVersion: exp.activeVersion, saved: w.ok });
+  1193→    deps?.broadcastState();
+  1194→    return { ok: w.ok, id: exp.id, proposedVersion, error: w.error };
+  1195→  });
+  1196→}
+  1197→
+  1198→/* ------------------------------------------------------------------ */
+  1199→/* Owner actions — paired dashboard ONLY (never the admin API)         */
+  1200→/* ------------------------------------------------------------------ */
+  1201→
+  1202→export type OwnerAction = 'approve' | 'reject' | 'deprecate' | 'archive' | 'restore' | 'delete';
+  1203→
+  1204→async function ownerAction(
+  1205→  id: string,
+  1206→  action: OwnerAction,
+  1207→  reason: string,
+  1208→  actor: string,
+  1209→  versionOverride?: number,
+  1210→): Promise<{ ok: boolean; record?: ExperienceRecord; error?: string }> {
+  1211→  return enqueue(async () => {
+  1212→    const exp = findExperience(id);
+  1213→    if (!exp) return { ok: false, error: `unknown experience "${id}"` };
+  1214→    const why = truncate(reason, 500) || `owner ${action} from dashboard`;
+  1215→
+  1216→    switch (action) {
+  1217→      case 'approve': {
+  1218→        const version = exp.versions.find((v) => v.version === (versionOverride ?? exp.activeVersion));
+  1219→        if (!version) return { ok: false, error: `version ${versionOverride ?? exp.activeVersion} not found` };
+  1220→        const oldActive = exp.activeVersion;
+  1221→        version.verificationStatus = 'human_approved';
+  1222→        version.verificationSummary = `owner approval on the dashboard by ${actor} — human review stands in for automated checks`;
+  1223→        exp.activeVersion = version.version;
+  1224→        exp.status = 'verified';
+  1225→        audit(actor, 'experience_promote', 'experience', exp.id, { oldVersion: oldActive, newVersion: version.version, reason: why });
+  1226→        break;
+  1227→      }
+  1228→      case 'reject': {
+  1229→        const version = exp.versions.find((v) => v.version === (versionOverride ?? exp.activeVersion));
+  1230→        if (version && version.verificationStatus === 'pending') {
+  1231→          version.verificationStatus = 'failed';
+  1232→          version.verificationSummary = `rejected by owner: ${why}`;
+  1233→        }
+  1234→        exp.status = 'rejected';
+  1235→        audit(actor, 'experience_reject', 'experience', exp.id, { reason: why });
+  1236→        break;
+  1237→      }
+  1238→      case 'deprecate': {
+  1239→        exp.status = 'deprecated';
+  1240→        audit(actor, 'experience_deprecate', 'experience', exp.id, { reason: why });
+  1241→        break;
+  1242→      }
+  1243→      case 'archive': {
+  1244→        exp.status = 'archived';
+  1245→        exp.archivedAt = nowIso();
+  1246→        audit(actor, 'experience_archive', 'experience', exp.id, { reason: why });
+  1247→        break;
+  1248→      }
+  1249→      case 'restore': {
+  1250→        if (!exp.archivedAt && exp.status !== 'deprecated' && exp.status !== 'rejected') {
+  1251→          return { ok: false, error: 'record is not archived/deprecated/rejected — nothing to restore' };
+  1252→        }
+  1253→        exp.status = 'candidate'; // honest default: re-verify to re-trust
+  1254→        exp.archivedAt = null;
+  1255→        audit(actor, 'experience_restore', 'experience', exp.id, { reason: `${why} (restored as candidate — re-verify to re-trust)` });
+  1256→        break;
+  1257→      }
+  1258→      case 'delete': {
+  1259→        if (exp.deletedAt) return { ok: false, error: 'record already deleted' };
+  1260→        exp.deletedAt = nowIso(); // soft delete — audit history is preserved (plan §9)
+  1261→        audit(actor, 'experience_delete', 'experience', exp.id, { reason: why });
+  1262→        break;
+  1263→      }
+  1264→      default:
+  1265→        return { ok: false, error: `unknown action "${action}"` };
+  1266→    }
+  1267→
+  1268→    exp.updatedAt = nowIso();
+  1269→    dirty.experiences = true;
+  1270→    dirty.audit = true;
+  1271→    const w = await persistDirty(actor);
+  1272→    journal('web', actor, 'knowledge:action', w.ok,
+  1273→      w.ok ? `Owner action “${action}” on ${exp.id}: ${why}` : `Owner action “${action}” on ${exp.id} NOT saved: ${w.error}`,
+  1274→      { id: exp.id, action, saved: w.ok });
+  1275→    deps?.broadcastState();
+  1276→    return { ok: w.ok, record: exp, error: w.error };
+  1277→  });
+  1278→}
+  1279→
+  1280→/* ------------------------------------------------------------------ */
+  1281→/* Read APIs + dashboard state                                         */
+  1282→/* ------------------------------------------------------------------ */
+  1283→
+  1284→function getExperience(id: string): { ok: boolean; record?: ExperienceRecord; feedback?: FeedbackRecord[]; error?: string } {
+  1285→  const exp = findExperience(id);
+  1286→  if (!exp) return { ok: false, error: `unknown experience "${id}"` };
+  1287→  return { ok: true, record: exp, feedback: store.feedback.filter((f) => f.experienceId === id).slice(-50).reverse() };
+  1288→}
+  1289→
+  1290→function counts(): KnowledgeCounts {
+  1291→  const live = store.experiences.filter((e) => !e.deletedAt);
+  1292→  return {
+  1293→    verified: live.filter((e) => e.status === 'verified').length,
+  1294→    candidate: live.filter((e) => e.status === 'candidate').length,
+  1295→    verificationPending: live.filter((e) => e.status === 'verification_pending').length,
+  1296→    rejected: live.filter((e) => e.status === 'rejected').length,
+  1297→    deprecated: live.filter((e) => e.status === 'deprecated').length,
+  1298→    archived: live.filter((e) => e.status === 'archived').length,
+  1299→    deleted: store.experiences.filter((e) => e.deletedAt).length,
+  1300→    attempts: store.attempts.length,
+  1301→    feedback: store.feedback.length,
+  1302→    audit: store.audit.length,
+  1303→  };
+  1304→}
+  1305→
+  1306→function summary(): KnowledgeSummary {
+  1307→  return {
+  1308→    ok: true,
+  1309→    online: store.online,
+  1310→    syncedAt: store.syncedAt,
+  1311→    note: store.note,
+  1312→    counts: counts(),
+  1313→    projectName: deps?.projectName() ?? null,
+  1314→  };
+  1315→}
+  1316→
+  1317→function stateForWeb() {
+  1318→  return {
+  1319→    ok: true,
+  1320→    online: store.online,
+  1321→    syncedAt: store.syncedAt,
+  1322→    note: store.note,
+  1323→    counts: counts(),
+  1324→    projectName: deps?.projectName() ?? null,
+  1325→    storeDir: STORE_DIR,
+  1326→    experiences: store.experiences
+  1327→      .filter((e) => !e.deletedAt)
+  1328→      .map((e) => ({
+  1329→        ...e,
+  1330→        versions: e.versions.map((v) => ({
+  1331→          ...v,
+  1332→          evidence: v.evidence.slice(-10).map((ev) => ({ ...ev, summary: truncate(ev.summary, 300) })),
+  1333→        })),
+  1334→      })),
+  1335→    attempts: store.attempts.slice(-100).reverse(),
+  1336→    feedback: store.feedback.slice(-100).reverse(),
+  1337→    audit: store.audit.slice(-100).reverse(),
+  1338→  };
+  1339→}
+  1340→
+  1341→/* ------------------------------------------------------------------ */
+  1342→/* Init — hot-reload probe comment */
+  1343→/* ------------------------------------------------------------------ */
+  1344→
+  1345→export interface KnowledgeApi {
+  1346→  sync: (source?: 'operator' | 'web' | 'system', actor?: string) => Promise<StoreState>;
+  1347→  search: (query: string, opts: SearchOptions, source?: 'operator' | 'web' | 'system', actor?: string) => SearchOutcome;
+  1348→  submit: (input: SubmitInput, source: 'operator' | 'web', actor: string, sessionId?: string) => Promise<{ ok: boolean; id?: string; flagged?: boolean; error?: string }>;
+  1349→  attempt: (input: AttemptInput, source: 'operator' | 'web', actor: string, sessionId?: string) => Promise<{ ok: boolean; id?: string; error?: string }>;
+  1350→  feedback: (input: FeedbackInput, source: 'operator' | 'web', actor: string, sessionId?: string) => Promise<{ ok: boolean; id?: string; error?: string }>;
+  1351→  verify: (id: string, checks: CheckSpec[], source: 'operator' | 'web', actor: string, version?: number) => Promise<VerifyOutcome>;
+  1352→  propose: (id: string, input: ProposalInput, source: 'operator' | 'web', actor: string) => Promise<{ ok: boolean; id?: string; proposedVersion?: number; error?: string }>;
+  1353→  ownerAction: (id: string, action: OwnerAction, reason: string, actor: string, version?: number) => Promise<{ ok: boolean; record?: ExperienceRecord; error?: string }>;
+  1354→  get: (id: string) => { ok: boolean; record?: ExperienceRecord; feedback?: FeedbackRecord[]; error?: string };
+  1355→  summary: () => KnowledgeSummary;
+  1356→  stateForWeb: () => ReturnType<typeof stateForWeb>;
+  1357→  categories: readonly string[];
+  1358→}
+  1359→
+  1360→export function initKnowledge(
+  1361→  injected: KnowledgeDeps & {
+  1362→    /** raw extension tool exec used for store-file sync (not journaled) */
+  1363→    rawExec: typeof rawExec;
+  1364→  },
+  1365→): KnowledgeApi {
+  1366→  deps = injected;
+  1367→  rawExec = injected.rawExec;
+  1368→  cacheFile = join(injected.dataDir, 'knowledge-cache.json');
+  1369→  loadLocalCache();
+  1370→  return {
+  1371→    sync: (source = 'system', actor = 'System') => syncFromWorkspace(source, actor),
+  1372→    search: (query, opts, source = 'operator', actor = 'GLM (z.ai web)') => search(query, opts, source, actor),
+  1373→    submit: submitExperience,
+  1374→    attempt: recordAttempt,
+  1375→    feedback: recordFeedback,
+  1376→    verify: verifyExperience,
+  1377→    propose: proposeImprovement,
+  1378→    ownerAction,
+  1379→    get: getExperience,
+  1380→    summary,
+  1381→    stateForWeb,
+  1382→    categories: CATEGORIES,
+  1383→  };
+  1384→}
+  1385→

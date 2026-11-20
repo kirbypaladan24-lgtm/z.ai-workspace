@@ -7,10 +7,9 @@ const nextConfig: NextConfig = {
     ignoreBuildErrors: true,
   },
   reactStrictMode: false,
-  allowedDevOrigins: [
-    "https://preview-chat-d35f931f-736d-4ec7-b184-0109ff502f8a.space-z.ai",
-    "*.space-z.ai",
-  ],
+  allowedDevOrigins: ["*.space-z.ai"],
+  // keep the dashboard preview clean — no floating dev-tools bubble
+  devIndicators: false,
 };
 
 export default nextConfig;

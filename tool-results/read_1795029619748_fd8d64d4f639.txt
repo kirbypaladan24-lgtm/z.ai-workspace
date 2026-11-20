@@ -1,0 +1,452 @@
+   440→   440→    };
+   441→   441→    walk(tree.tree);
+   442→   442→    return count;
+   443→   443→  }, [tree, filter]);
+   444→   444→
+   445→   445→  const toggleDir = (path: string) => {
+   446→   446→    setExpanded((prev) => {
+   447→   447→      const next = new Set(prev);
+   448→   448→      if (next.has(path)) next.delete(path);
+   449→   449→      else next.add(path);
+   450→   450→      return next;
+   451→   451→    });
+   452→   452→  };
+   453→   453→
+   454→   454→  /* ---------------------------------------------------------------- */
+   455→   455→  /* Render                                                            */
+   456→   456→  /* ---------------------------------------------------------------- */
+   457→   457→  return (
+   458→   458→    <div className="min-h-screen flex flex-col bg-vs-bg text-vs-text">
+   459→   459→      {/* Header */}
+   460→   460→      <header className="border-b border-vs-border bg-vs-panel-2 px-4 py-2.5 flex items-center gap-3 flex-wrap sticky top-0 z-20">
+   461→   461→        <div className="flex items-center gap-2">
+   462→   462→          <div className="size-8 rounded-md bg-vs-blue/15 border border-vs-blue/40 flex items-center justify-center">
+   463→   463→            <Zap className="size-4 text-vs-blue-bright" />
+   464→   464→          </div>
+   465→   465→          <div>
+   466→   466→            <h1 className="text-sm font-semibold leading-tight">Z.ai Workspace Bridge</h1>
+   467→   467→            <p className="text-[11px] text-vs-dim leading-tight">
+   468→   468→              Chat with GLM on z.ai · watch every action on your workspace here
+   469→   469→            </p>
+   470→   470→          </div>
+   471→   471→        </div>
+   472→   472→        <div className="flex-1" />
+   473→   473→        <div className="flex items-center gap-2 flex-wrap">
+   474→   474→          <Badge variant="outline" className={svcUp ? 'border-vs-green/40 text-vs-green' : 'border-vs-border-2 text-vs-dim'}>
+   475→   475→            {svcUp ? <Wifi className="size-3 mr-1" /> : <WifiOff className="size-3 mr-1" />}
+   476→   476→            {svcUp ? 'server online' : 'server offline'}
+   477→   477→          </Badge>
+   478→   478→          <Badge variant="outline" className={wsOnline ? 'border-vs-blue-bright/40 text-vs-blue-bright' : 'border-vs-yellow/40 text-vs-yellow'}>
+   479→   479→            <TerminalSquare className="size-3 mr-1" />
+   480→   480→            {wsOnline ? status.workspaceName ?? 'workspace online' : 'workspace offline'}
+   481→   481→          </Badge>
+   482→   482→          {paired && (
+   483→   483→            <Badge variant="outline" className="border-vs-green/40 text-vs-green">
+   484→   484→              <Link2 className="size-3 mr-1" /> paired
+   485→   485→            </Badge>
+   486→   486→          )}
+   487→   487→          {status.tree?.files ? (
+   488→   488→            <Badge variant="outline" className="border-vs-border-2 text-vs-dim">
+   489→   489→              <HardDrive className="size-3 mr-1" /> {status.tree.files.toLocaleString()} files
+   490→   490→            </Badge>
+   491→   491→          ) : null}
+   492→   492→        </div>
+   493→   493→      </header>
+   494→   494→
+   495→   495→      {/* Body */}
+   496→   496→      <div className="flex-1 p-4 max-w-[1500px] w-full mx-auto">
+   497→   497→        {/* Pairing banner */}
+   498→   498→        {!paired && (
+   499→   499→          <Card className="mb-4 bg-vs-panel border-vs-border">
+   500→   500→            <CardContent className="px-4 py-4 flex flex-col sm:flex-row sm:items-center gap-4">
+   501→   501→              <div className="flex-1 min-w-0">
+   502→   502→                <div className="text-xs font-semibold uppercase tracking-wide text-vs-text flex items-center gap-1.5">
+   503→   503→                  <Link2 className="size-3.5" /> Pair this browser with your workspace
+   504→   504→                </div>
+   505→   505→                <p className="text-[11px] text-vs-dim mt-1.5 leading-relaxed">
+   506→   506→                  In VS Code, open the <span className="text-vs-text">AI Code Agent</span> panel (zap icon) — the connector shows a
+   507→   507→                  6-character pairing code. Enter it once to unlock the Workspace explorer and the live AI activity feed.
+   508→   508→                </p>
+   509→   509→                {pairingNote && <p className="text-[11px] text-vs-yellow mt-1.5">{pairingNote}</p>}
+   510→   510→              </div>
+   511→   511→              <div className="flex gap-2 flex-none">
+   512→   512→                <Input
+   513→   513→                  value={pairInput}
+   514→   514→                  onChange={(e) => setPairInput(e.target.value.toUpperCase())}
+   515→   515→                  onKeyDown={(e) => e.key === 'Enter' && pair(pairInput)}
+   516→   516→                  placeholder="6-char code"
+   517→   517→                  maxLength={12}
+   518→   518→                  className="font-mono tracking-widest w-40"
+   519→   519→                />
+   520→   520→                <Button onClick={() => pair(pairInput)} size="sm" className="font-semibold">Pair</Button>
+   521→   521→                <Button onClick={pasteAndPair} size="sm" variant="outline" className="border-vs-border-2" title="Paste code from clipboard">
+   522→   522→                  <ClipboardPaste className="size-3.5" />
+   523→   523→                </Button>
+   524→   524→              </div>
+   525→   525→            </CardContent>
+   526→   526→          </Card>
+   527→   527→        )}
+   528→   528→
+   529→   529→        {/* Reconnect kit — new machine setup, visible while the workspace is offline */}
+   530→   530→        {!wsOnline && (
+   531→   531→          <Card className="mb-4 bg-vs-panel border-vs-border">
+   532→   532→            <CardContent className="px-4 py-4 space-y-3">
+   533→   533→              <div className="flex items-center gap-2 flex-wrap">
+   534→   534→                <div className="text-xs font-semibold uppercase tracking-wide text-vs-text flex items-center gap-1.5">
+   535→   535→                  <Download className="size-3.5 text-vs-green" /> Reconnect kit — new machine setup
+   536→   536→                </div>
+   537→   537→                <Badge variant="outline" className="border-vs-yellow/40 text-vs-yellow text-[10px]">workspace offline</Badge>
+   538→   538→              </div>
+   539→   539→              <p className="text-[11px] text-vs-dim leading-relaxed">
+   540→   540→                All copy-paste, no URL editing. This card disappears the moment your VS Code connects.
+   541→   541→              </p>
+   542→   542→              <div className="space-y-2.5">
+   543→   543→                <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
+   544→   544→                  <div className="text-[10px] uppercase tracking-wide text-vs-dim lg:w-44 flex-none">1 · download extension</div>
+   545→   545→                  <a
+   546→   546→                    href="/ai-code-agent-0.5.0.vsix"
+   547→   547→                    download="ai-code-agent-0.5.0.vsix"
+   548→   548→                    target="_blank"
+   549→   549→                    rel="noopener"
+   550→   550→                    className="inline-flex items-center gap-1.5 rounded-md border border-vs-green/40 text-vs-green px-2.5 py-1.5 text-[11px] font-mono hover:bg-vs-green/10 transition-colors flex-none"
+   551→   551→                    title="Download the VSIX (58 KB)"
+   552→   552→                  >
+   553→   553→                    <Download className="size-3.5" /> ai-code-agent-0.5.0.vsix · 58 KB
+   554→   554→                  </a>
+   555→   555→                  <span className="text-[10px] text-vs-dim">if the preview swallows the click — open this page in a new tab first, then click</span>
+   556→   556→                </div>
+   557→   557→                <div className="flex flex-col gap-1.5 lg:flex-row lg:items-center">
+   558→   558→                  <div className="text-[10px] uppercase tracking-wide text-vs-dim lg:w-44 flex-none">2 · install (terminal)</div>
+   559→   559→                  <div className="flex-1 min-w-0">
+   560→   560→                    <CopyField value="cd ~/Downloads && code --install-extension ai-code-agent-0.5.0.vsix" />
+   561→   561→                  </div>
+   562→   562→                </div>
+   563→   563→                <div className="flex flex-col gap-1.5 lg:flex-row lg:items-center">
+   564→   564→                  <div className="text-[10px] uppercase tracking-wide text-vs-dim lg:w-44 flex-none">3 · server url → settings</div>
+   565→   565→                  <div className="flex-1 min-w-0">
+   566→   566→                    <CopyField value={pageUrl || '…'} />
+   567→   567→                  </div>
+   568→   568→                </div>
+   569→   569→                <div className="flex flex-col gap-1.5 lg:flex-row lg:items-start">
+   570→   570→                  <div className="text-[10px] uppercase tracking-wide text-vs-dim lg:w-44 flex-none">4 · identity (optional)</div>
+   571→   571→                  <div className="text-[11px] text-vs-dim leading-relaxed flex-1 min-w-0">
+   572→   572→                    Only when migrating from a previous bridge install: copy the workspace id + secret from the old setup into{" "}
+   573→   573→                    <span className="font-mono text-vs-text">AI Code Agent: Set Workspace Identity…</span>. Skipping this pairs fresh —
+   574→   574→                    the dashboard journal starts empty, which is the clean default.
+   575→   575→                  </div>
+   576→   576→                </div>
+   577→   577→                <div className="flex flex-col gap-1.5 lg:flex-row lg:items-start">
+   578→   578→                  <div className="text-[10px] uppercase tracking-wide text-vs-dim lg:w-44 flex-none">5 · connect + pair</div>
+   579→   579→                  <div className="text-[11px] text-vs-dim leading-relaxed flex-1 min-w-0">
+   580→   580→                    Command palette → <span className="font-mono text-vs-text">AI Code Agent: Set Workspace Identity…</span> with the two
+   581→   581→                    values from step 4, then <span className="font-mono text-vs-text">AI Code Agent: Connect</span>. Its panel shows a
+   582→   582→                    6-char pairing code — type it into the pair box at the top of this page and the feed unlocks.
+   583→   583→                  </div>
+   584→   584→                </div>
+   585→   585→              </div>
+   586→   586→            </CardContent>
+   587→   587→          </Card>
+   588→   588→        )}
+   589→   589→
+   590→   590→        {/* Stats row */}
+   591→   591→        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-3 mb-4">
+   592→   592→          <StatChip icon={<HardDrive className="size-3.5" />} label="files" value={tree?.stats ? tree.stats.files.toLocaleString() : '—'} sub={tree?.stats ? fmtBytes(tree.stats.totalBytes) : undefined} />
+   593→   593→          <StatChip icon={<Folder className="size-3.5" />} label="folders" value={tree?.stats ? tree.stats.dirs.toLocaleString() : '—'} />
+   594→   594→          <StatChip icon={<Eye className="size-3.5" />} label="AI reads" value={String(stats.reads)} accent="text-vs-var" />
+   595→   595→          <StatChip icon={<PencilLine className="size-3.5" />} label="AI writes" value={String(stats.writes)} accent="text-vs-green" />
+   596→   596→          <StatChip icon={<Pencil className="size-3.5" />} label="AI edits" value={String(stats.edits)} accent="text-vs-tan" />
+   597→   597→          <StatChip icon={<Trash2 className="size-3.5" />} label="AI deletes" value={String(stats.deletes)} accent="text-vs-red" />
+   598→   598→          <StatChip icon={<GraduationCap className="size-3.5" />} label="skills" value={String(skills.length)} sub={skills.length ? 'in .skills/' : undefined} accent="text-vs-purple" />
+   599→   599→        </div>
+   600→   600→
+   601→   601→        {/* Main grid */}
+   602→   602→        <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
+   603→   603→          {/* LEFT — Workspace */}
+   604→   604→          <div className="xl:col-span-7 space-y-4 min-w-0">
+   605→   605→            <Card className="bg-vs-panel border-vs-border flex flex-col">
+   606→   606→              <CardHeader className="pb-2 pt-4 px-4 flex-row items-center gap-2 flex-wrap">
+   607→   607→                <CardTitle className="text-xs font-semibold uppercase tracking-wide text-vs-text flex items-center gap-1.5">
+   608→   608→                  <FolderTreeIcon /> Workspace
+   609→   609→                </CardTitle>
+   610→   610→                <Badge variant="outline" className="border-vs-border-2 text-vs-dim font-mono text-[10px]">
+   611→   611→                  {tree?.name ?? status.workspaceName ?? '—'}
+   612→   612→                </Badge>
+   613→   613→                {tree?.stats?.truncated && (
+   614→   614→                  <Badge variant="outline" className="border-vs-yellow/40 text-vs-yellow text-[10px]">truncated view</Badge>
+   615→   615→                )}
+   616→   616→                <div className="flex-1" />
+   617→   617→                <div className="flex items-center gap-2">
+   618→   618→                  <div className="relative">
+   619→   619→                    <Search className="size-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-vs-dim" />
+   620→   620→                    <Input
+   621→   621→                      value={filter}
+   622→   622→                      onChange={(e) => setFilter(e.target.value)}
+   623→   623→                      placeholder="filter files…"
+   624→   624→                      className="h-8 text-xs pl-7 w-40 sm:w-52"
+   625→   625→                    />
+   626→   626→                  </div>
+   627→   627→                  <Button onClick={refreshTree} disabled={!paired || treeLoading} variant="outline" size="sm" className="border-vs-border-2 h-8" title="Rescan workspace">
+   628→   628→                    {treeLoading ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+   629→   629→                  </Button>
+   630→   630→                </div>
+   631→   631→              </CardHeader>
+   632→   632→              <CardContent className="px-2 pb-4 pt-1">
+   633→   633→                {!paired ? (
+   634→   634→                  <LockedPanel text="Pair this browser to explore every file in your VS Code workspace." />
+   635→   635→                ) : !wsOnline ? (
+   636→   636→                  <LockedPanel text="Workspace offline — open VS Code with the AI Code Agent extension connected." icon={<WifiOff className="size-8" />} />
+   637→   637→                ) : !tree?.tree ? (
+   638→   638→                  <div className="text-center py-14 text-vs-dim text-xs">
+   639→   639→                    {treeLoading ? <Loader2 className="size-6 animate-spin mx-auto mb-3" /> : <FolderTreeIcon />}
+   640→   640→                    <p className="max-w-sm mx-auto leading-relaxed">
+   641→   641→                      {treeLoading
+   642→   642→                        ? 'Scanning the workspace…'
+   643→   643→                        : 'No workspace scan yet. Press the refresh button, or make sure the AI Code Agent extension v0.4.0+ is installed in VS Code.'}
+   644→   644→                    </p>
+   645→   645→                  </div>
+   646→   646→                ) : (
+   647→   647→                  <>
+   648→   648→                    <div className="max-h-[420px] overflow-y-auto text-xs font-mono" data-testid="file-explorer">
+   649→   649→                      {rows.length === 0 && (
+   650→   650→                        <p className="text-center text-vs-dim py-8">
+   651→   651→                          {filter ? `No files match “${filter}”.` : 'Empty workspace.'}
+   652→   652→                        </p>
+   653→   653→                      )}
+   654→   654→                      {rows.map(({ node, depth }) => (
+   655→   655→                        <FileRow
+   656→   656→                          key={node.path}
+   657→   657→                          node={node}
+   658→   658→                          depth={depth}
+   659→   659→                          expanded={node.type === 'dir' && expanded.has(node.path)}
+   660→   660→                          onToggle={() => toggleDir(node.path)}
+   661→   661→                          onOpen={() => readFile(node.path)}
+   662→   662→                          active={fileView?.path === node.path}
+   663→   663→                          highlight={!!filter.trim()}
+   664→   664→                        />
+   665→   665→                      ))}
+   666→   666→                      {filter && totalFlatHits > 300 && !showAllFlat && (
+   667→   667→                        <button suppressHydrationWarning className="w-full text-center py-2 text-[11px] text-vs-blue-bright hover:underline" onClick={() => setShowAllFlat(true)}>
+   668→   668→                          show {Math.min(totalFlatHits, 1000) - 300} more of {totalFlatHits} matches…
+   669→   669→                        </button>
+   670→   670→                      )}
+   671→   671→                    </div>
+   672→   672→                    <Separator className="bg-vs-border my-2" />
+   673→   673→                    <div className="flex items-center gap-3 text-[10.5px] text-vs-dim flex-wrap">
+   674→   674→                      <span>{tree.stats?.files?.toLocaleString()} files · {tree.stats?.dirs?.toLocaleString()} folders</span>
+   675→   675→                      {tree.stats?.totalBytes ? <span>· {fmtBytes(tree.stats.totalBytes)} of source</span> : null}
+   676→   676→                      {tree.stats?.scannedAt ? <span>· scanned {new Date(tree.stats.scannedAt).toLocaleTimeString()}</span> : null}
+   677→   677→                      <span className="flex-1" />
+   678→   678→                      <button suppressHydrationWarning className="flex items-center gap-1 hover:text-vs-text" onClick={() => setExpanded(new Set(['']))}>
+   679→   679→                        collapse all
+   680→   680→                      </button>
+   681→   681→                    </div>
+   682→   682→                  </>
+   683→   683→                )}
+   684→   684→              </CardContent>
+   685→   685→            </Card>
+   686→   686→
+   687→   687→            {/* File viewer */}
+   688→   688→            {fileView && (
+   689→   689→              <Card className="bg-vs-panel border-vs-border">
+   690→   690→                <CardHeader className="pb-2 pt-4 px-4 flex-row items-center gap-2">
+   691→   691→                  <FileCode className="size-3.5 text-vs-dim" />
+   692→   692→                  <CardTitle className="text-xs font-mono text-vs-bright truncate flex-1 min-w-0" title={fileView.path}>
+   693→   693→                    {fileView.path}
+   694→   694→                  </CardTitle>
+   695→   695→                  {fileView.meta?.bytes !== undefined && (
+   696→   696→                    <Badge variant="outline" className="border-vs-border-2 text-vs-dim text-[10px] font-mono">
+   697→   697→                      {fmtBytes(fileView.meta.bytes)}{fileView.meta?.lines ? ` · ${fileView.meta.lines} lines` : ''}
+   698→   698→                    </Badge>
+   699→   699→                  )}
+   700→   700→                  <Button
+   701→   701→                    variant="ghost" size="sm" className="h-6 px-2 text-vs-dim"
+   702→   702→                    onClick={() => navigator.clipboard.writeText(fileView.content ?? '').catch(() => undefined)}
+   703→   703→                    title="Copy content"
+   704→   704→                  >
+   705→   705→                    <Copy className="size-3.5" />
+   706→   706→                  </Button>
+   707→   707→                  <Button variant="ghost" size="sm" className="h-6 px-2 text-vs-dim" onClick={() => setFileView(null)} title="Close">
+   708→   708→                    <X className="size-3.5" />
+   709→   709→                  </Button>
+   710→   710→                </CardHeader>
+   711→   711→                <CardContent className="px-4 pb-4 pt-0">
+   712→   712→                  {fileView.loading ? (
+   713→   713→                    <div className="py-10 text-center text-vs-dim text-xs flex flex-col items-center gap-2">
+   714→   714→                      <Loader2 className="size-5 animate-spin" /> reading {fileView.path}…
+   715→   715→                    </div>
+   716→   716→                  ) : fileView.error ? (
+   717→   717→                    <div className="py-6 text-center text-vs-red text-xs">{fileView.error}</div>
+   718→   718→                  ) : (
+   719→   719→                    <pre className="text-[10.5px] font-mono text-vs-text whitespace-pre-wrap break-all bg-vs-bg border border-vs-border rounded-md p-3 max-h-[460px] overflow-auto" data-testid="file-content">
+   720→   720→                      {(fileView.content ?? '').slice(0, 300000) || '(empty file)'}
+   721→   721→                    </pre>
+   722→   722→                  )}
+   723→   723→                </CardContent>
+   724→   724→              </Card>
+   725→   725→            )}
+   726→   726→
+   727→   727→            {/* Connect guide */}
+   728→   728→            <Card className="bg-vs-panel border-vs-border">
+   729→   729→              <CardContent className="px-4 py-4">
+   730→   730→                <div className="text-[10px] uppercase tracking-wide text-vs-dim mb-2 flex items-center gap-1.5">
+   731→   731→                  <User className="size-3" /> how this works
+   732→   732→                </div>
+   733→   733→                <ol className="text-[11px] text-vs-dim space-y-1.5 list-decimal list-inside leading-relaxed">
+   734→   734→                  <li>Install the <span className="text-vs-bright">AI Code Agent</span> extension (v0.5.0+) in VS Code — the VSIX lives on this dashboard: <a href="/ai-code-agent-0.5.0.vsix" className="font-mono text-vs-blue-bright underline">/ai-code-agent-0.5.0.vsix</a>.</li>
+   735→   735→                  <li>Settings → <span className="font-mono text-vs-text">aiCodeAgent.serverUrl</span> → paste this page&apos;s URL, then Command palette → <span className="font-mono text-vs-text">AI Code Agent: Connect</span> (migrating machines? <span className="font-mono text-vs-text">AI Code Agent: Set Workspace Identity…</span> first).</li>
+   736→   736→                  <li>Enter the pairing code from the extension panel above — once.</li>
+   737→   737→                  <li>Chat with GLM at <span className="text-vs-blue-bright">z.ai</span> and ask it to work on your code.</li>
+   738→   738→                  <li>Every read, write, edit, delete and command appears in the feed → with diffs you can read.</li>
+   739→   739→                  <li>Drop skill documents into a <span className="font-mono text-vs-purple">.skills/</span> folder in your workspace — GLM finds them, reads them and follows them <span className="text-vs-text">before</span> starting a task. Say <span className="font-mono text-vs-text">{'“use the skill <name>”'}</span> in your z.ai chat to apply one.</li>
+   740→   740→                </ol>
+   741→   741→              </CardContent>
+   742→   742→            </Card>
+   743→   743→          </div>
+   744→   744→
+   745→   745→          {/* RIGHT — Skills + AI Activity */}
+   746→   746→          <div className="xl:col-span-5 space-y-4 min-w-0">
+   747→   747→            {/* Skills — teach the AI before it starts thinking */}
+   748→   748→            <Card className="bg-vs-panel border-vs-border" data-testid="skills-card">
+   749→   749→              <CardHeader className="pb-2 pt-4 px-4 flex-row items-center gap-2 flex-wrap">
+   750→   750→                <CardTitle className="text-xs font-semibold uppercase tracking-wide text-vs-text flex items-center gap-1.5">
+   751→   751→                  <GraduationCap className="size-3.5 text-vs-purple" /> Skills
+   752→   752→                </CardTitle>
+   753→   753→                <Badge variant="outline" className="border-vs-border-2 text-vs-dim font-mono text-[10px]">
+   754→   754→                  {skills.length} in .skills/
+   755→   755→                </Badge>
+   756→   756→                <div className="flex-1" />
+   757→   757→                <button
+   758→   758→                  suppressHydrationWarning
+   759→   759→                  className="text-[10px] text-vs-dim hover:text-vs-text flex items-center gap-1 disabled:opacity-50"
+   760→   760→                  onClick={refreshSkills}
+   761→   761→                  disabled={!paired || skillsRefreshing}
+   762→   762→                  title="Re-check the workspace .skills/ folder now"
+   763→   763→                  data-testid="skill-refresh"
+   764→   764→                >
+   765→   765→                  {skillsRefreshing ? <Loader2 className="size-3 animate-spin" /> : <RefreshCw className="size-3" />}
+   766→   766→                  re-check
+   767→   767→                </button>
+   768→   768→              </CardHeader>
+   769→   769→              <CardContent className="px-4 pb-4 pt-1 space-y-3">
+   770→   770→                <p className="text-[11px] text-vs-dim leading-relaxed" data-testid="skill-explainer">
+   771→   771→                  Skills live in <span className="text-vs-text">your workspace</span> — create a{' '}
+   772→   772→                  <span className="font-mono text-vs-purple">.skills/</span> folder and drop skill documents in
+   773→   773→                  (loose files, or a sub-folder per skill with a <span className="font-mono">SKILL.md</span>).
+   774→   774→                  GLM re-reads them <span className="text-vs-text">before every task</span> — say{' '}
+   775→   775→                  <span className="font-mono text-vs-text">{'“use the skill <name>”'}</span> in your z.ai chat to apply one.
+   776→   776→                </p>
+   777→   777→
+   778→   778→                {!wsOnline && (
+   779→   779→                  <p className="text-[10.5px] text-vs-yellow flex items-center gap-1.5" data-testid="skill-offline">
+   780→   780→                    <AlertTriangle className="size-3 flex-none" /> workspace offline — .skills/ is checked when VS Code reconnects.
+   781→   781→                  </p>
+   782→   782→                )}
+   783→   783→                {wsOnline && skills.length === 0 && skillsMeta.note && (
+   784→   784→                  <p className="text-[10.5px] text-vs-dim flex items-start gap-1.5" data-testid="skill-note">
+   785→   785→                    <AlertTriangle className="size-3 flex-none mt-0.5 text-vs-yellow" /> {skillsMeta.note}
+   786→   786→                  </p>
+   787→   787→                )}
+   788→   788→
+   789→   789→                {/* list */}
+   790→   790→                {skills.length === 0 ? (
+   791→   791→                  <p className="text-center text-vs-dim text-[10.5px] py-2" data-testid="skill-empty">
+   792→   792→                    no skills in .skills/ yet — create the folder in your workspace and drop skill documents in
+   793→   793→                  </p>
+   794→   794→                ) : (
+   795→   795→                  <div className="max-h-56 overflow-y-auto space-y-1" data-testid="skill-list">
+   796→   796→                    {skills.map((s) => (
+   797→   797→                      <SkillRow
+   798→   798→                        key={s.name}
+   799→   799→                        s={s}
+   800→   800→                        active={skillView?.name === s.name}
+   801→   801→                        onOpen={() => openSkill(s.name)}
+   802→   802→                      />
+   803→   803→                    ))}
+   804→   804→                  </div>
+   805→   805→                )}
+   806→   806→
+   807→   807→                {/* skill viewer */}
+   808→   808→                {skillView && (
+   809→   809→                  <div className="rounded-md border border-vs-border overflow-hidden" data-testid="skill-viewer">
+   810→   810→                    <div className="flex items-center gap-2 px-2.5 py-1.5 bg-vs-panel-2">
+   811→   811→                      <BookOpen className="size-3.5 text-vs-purple flex-none" />
+   812→   812→                      <span className="font-mono text-[11px] text-vs-bright truncate flex-1 min-w-0" title={skillView.name}>
+   813→   813→                        {skillView.name}
+   814→   814→                      </span>
+   815→   815→                      {skillView.skill?.format === 'package' && (
+   816→   816→                        <Badge variant="outline" className="border-vs-blue/40 text-vs-blue text-[8.5px] px-1.5 flex-none" data-testid="skill-package-badge">
+   817→   817→                          folder · {skillView.skill.files?.length ?? 0} files
+   818→   818→                        </Badge>
+   819→   819→                      )}
+   820→   820→                      <span className="text-[9px] text-vs-faint flex-none">
+   821→   821→                        from .skills/
+   822→   822→                      </span>
+   823→   823→                      <button suppressHydrationWarning className="text-vs-dim hover:text-vs-text flex-none" onClick={() => setSkillView(null)} title="Close">
+   824→   824→                        <X className="size-3.5" />
+   825→   825→                      </button>
+   826→   826→                    </div>
+   827→   827→                    {skillView.loading ? (
+   828→   828→                      <div className="py-6 text-center text-vs-dim text-xs flex flex-col items-center gap-2">
+   829→   829→                        <Loader2 className="size-4 animate-spin" /> reading {skillView.name}…
+   830→   830→                      </div>
+   831→   831→                    ) : skillView.error ? (
+   832→   832→                      <p className="py-3 text-center text-vs-red text-xs">{skillView.error}</p>
+   833→   833→                    ) : (
+   834→   834→                      <>
+   835→   835→                        <div className="px-2.5 py-2 bg-vs-purple/[0.08] border-b border-vs-border text-[10.5px] text-vs-purple leading-relaxed" data-testid="skill-learned">
+   836→   836→                          <span className="font-semibold">learned by GLM:</span> re-read from the workspace .skills/ folder before every task — it is applied automatically, and on request via “use the skill {skillView.name}”.
+   837→   837→                        </div>
+   838→   838→                        {(skillView.files ?? []).length > 1 && (
+   839→   839→                          <div className="flex items-center gap-1 px-2 py-1.5 border-b border-vs-border bg-vs-panel-2 overflow-x-auto" data-testid="skill-files">
+   840→   840→                            {skillView.files!.map((f) => (
+   841→   841→                              <button
+   842→   842→                                key={f.path}
+   843→   843→                                suppressHydrationWarning
+   844→   844→                                onClick={() => setSkillView((v) => (v ? { ...v, activeFile: f.path } : v))}
+   845→   845→                                title={`${f.path} · ${fmtBytes(f.size)}`}
+   846→   846→                                className={`flex-none font-mono text-[9.5px] px-2 py-0.5 border-t-2 transition-colors ${
+   847→   847→                                  skillView.activeFile === f.path
+   848→   848→                                    ? 'border-t-vs-blue text-vs-blue-bright bg-vs-bg'
+   849→   849→                                    : 'border-t-transparent text-vs-dim hover:text-vs-text hover:bg-vs-hover'
+   850→   850→                                }`}
+   851→   851→                                data-file={f.path}
+   852→   852→                                data-file-main={skillView.skill?.files?.find((m) => m.path === f.path)?.main ? 'true' : undefined}
+   853→   853→                              >
+   854→   854→                                {f.path.split('/').pop()}
+   855→   855→                                {skillView.skill?.files?.find((m) => m.path === f.path)?.main ? ' ★' : ''}
+   856→   856→                              </button>
+   857→   857→                            ))}
+   858→   858→                          </div>
+   859→   859→                        )}
+   860→   860→                        <pre className="text-[10.5px] font-mono text-vs-text whitespace-pre-wrap break-all bg-vs-bg p-3 max-h-64 overflow-auto" data-testid="skill-content">
+   861→   861→                          {(skillView.files && skillView.files.length > 0
+   862→   862→                            ? skillView.files.find((f) => f.path === skillView.activeFile)?.content ?? skillView.files[0].content
+   863→   863→                            : skillView.content ?? '').slice(0, 300000) || '(empty skill)'}
+   864→   864→                        </pre>
+   865→   865→                      </>
+   866→   866→                    )}
+   867→   867→                  </div>
+   868→   868→                )}
+   869→   869→              </CardContent>
+   870→   870→            </Card>
+   871→   871→
+   872→   872→            <Card className="bg-vs-panel border-vs-border flex flex-col">
+   873→   873→              <CardHeader className="pb-2 pt-4 px-4 flex-row items-center gap-2 flex-wrap">
+   874→   874→                <CardTitle className="text-xs font-semibold uppercase tracking-wide text-vs-text flex items-center gap-1.5">
+   875→   875→                  <Activity className="size-3.5" /> AI Activity
+   876→   876→                </CardTitle>
+   877→   877→                <div className="flex items-center gap-1">
+   878→   878→                  <FeedChip active={feedFilter === 'all'} onClick={() => setFeedFilter('all')}>All</FeedChip>
+   879→   879→                  <FeedChip active={feedFilter === 'ai'} onClick={() => setFeedFilter('ai')}>AI</FeedChip>
+   880→   880→                  <FeedChip active={feedFilter === 'you'} onClick={() => setFeedFilter('you')}>You</FeedChip>
+   881→   881→                  <FeedChip active={feedFilter === 'sys'} onClick={() => setFeedFilter('sys')}>System</FeedChip>
+   882→   882→                </div>
+   883→   883→                <div className="flex-1" />
+   884→   884→                {paired && (
+   885→   885→                  <Button onClick={clearActivity} variant="outline" size="sm" className="border-vs-border-2 h-7 text-[10px] text-vs-dim" title="Clear the activity log">
+   886→   886→                    <Trash className="size-3" />
+   887→   887→                  </Button>
+   888→   888→                )}
+   889→   889→              </CardHeader>
+
+[showing lines 440-889 of 1262; use offset=890 with limit to continue reading]

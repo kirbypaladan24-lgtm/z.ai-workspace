@@ -1,0 +1,102 @@
+{
+ "runId": "VRUN-000005",
+ "experiments": "Four bridge cases staged in the run sandbox (V0 N+1 counting, V2 locking experiment with threads, V1 SQLite docs, V4 Prisma v6 docs), plus V3 executed in the Z.ai sandbox VM with Prisma 6.19.2 as supplementary labeled evidence (output preserved at scripts/verifications/exp010/v3-prisma-experiment-output.txt).",
+ "cases": [
+  {
+   "name": "V0 N+1 measurement: loop pattern grows (N+1), single JOIN constant (1)",
+   "objective": "verify the record's core MEASURE-FIRST claim on real SQLite: query count grows linearly with rows for the loop pattern and stays constant for the batched read",
+   "category": "unit",
+   "command": "python3 knowledge/verification/sandbox/VRUN-000005/v0_nplus1_counts.py",
+   "timeoutMs": 120000,
+   "expected": {
+    "expectedResult": "V0-NPLUS1-CONFIRMED with exact counts 501 vs 1",
+    "successCriteria": "exit 0, loop executes exactly N+1=501 queries, JOIN exactly 1, loop slower",
+    "failureCriteria": "counts differ or latency relationship not reproduced"
+   },
+   "criteria": {
+    "exitCode": 0,
+    "outputContains": [
+     "V0-NPLUS1-CONFIRMED"
+    ],
+    "outputNotContains": []
+   },
+   "flags": {
+    "critical": true,
+    "requiresNetwork": false,
+    "destructive": false
+   }
+  },
+  {
+   "name": "V2 SQLite locking experiment: lock error, busy timeout, WAL concurrency",
+   "objective": "verify the corrected locking explanation experimentally: second writer blocked during an open write transaction; busy timeout defers; WAL allows readers during a pending write while writers still serialize",
+   "category": "integration",
+   "command": "python3 knowledge/verification/sandbox/VRUN-000005/v2_sqlite_locking.py",
+   "timeoutMs": 120000,
+   "expected": {
+    "expectedResult": "V2-SQLITE-LOCK-CONFIRMED with all four observations",
+    "successCriteria": "exit 0, 'database is locked' with short timeout, success with real timeout, WAL reader proceeds, WAL second writer blocked",
+    "failureCriteria": "any of the four locking observations not reproduced"
+   },
+   "criteria": {
+    "exitCode": 0,
+    "outputContains": [
+     "V2-SQLITE-LOCK-CONFIRMED"
+    ],
+    "outputNotContains": []
+   },
+   "flags": {
+    "critical": true,
+    "requiresNetwork": false,
+    "destructive": false
+   }
+  },
+  {
+   "name": "V1 doc-based: SQLite lock states, WAL one-writer, busy handler (live fetch)",
+   "objective": "verify the corrected locking explanation against the ACTUAL official SQLite documentation",
+   "category": "validation",
+   "command": "bash knowledge/verification/sandbox/VRUN-000005/v1_sqlite_docs.sh",
+   "timeoutMs": 90000,
+   "expected": {
+    "expectedResult": "V1-DOC-VERIFIED with quotes from lockingv3, wal and busy_timeout pages",
+    "successCriteria": "exit 0, RESERVED/PENDING state definitions found, one-writer-at-a-time found, busy-handler statement found",
+    "failureCriteria": "doc fetch fails or documented statements differ from the record's explanation"
+   },
+   "criteria": {
+    "exitCode": 0,
+    "outputContains": [
+     "V1-DOC-VERIFIED"
+    ],
+    "outputNotContains": []
+   },
+   "flags": {
+    "critical": true,
+    "requiresNetwork": true,
+    "destructive": false
+   }
+  },
+  {
+   "name": "V4 doc-based: Prisma v6 query logging + N+1 definition + batching nuance (live fetch)",
+   "objective": "verify against the ACTUAL official Prisma v6 docs (installed major version): logging configuration, the n+1 definition, and the documented batching nuance",
+   "category": "validation",
+   "command": "bash knowledge/verification/sandbox/VRUN-000005/v4_prisma_docs.sh",
+   "timeoutMs": 90000,
+   "expected": {
+    "expectedResult": "V4-DOC-VERIFIED with quotes from the logging and query-optimization pages",
+    "successCriteria": "exit 0, logging constructor + log array + events found, n+1 definition found, findMany batching nuance found",
+    "failureCriteria": "doc fetch fails or documented statements differ"
+   },
+   "criteria": {
+    "exitCode": 0,
+    "outputContains": [
+     "V4-DOC-VERIFIED"
+    ],
+    "outputNotContains": []
+   },
+   "flags": {
+    "critical": true,
+    "requiresNetwork": true,
+    "destructive": false
+   }
+  }
+ ]
+}

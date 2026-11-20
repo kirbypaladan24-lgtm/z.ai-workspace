@@ -56,6 +56,7 @@ import { join, dirname } from 'path';
 import ZAI from 'z-ai-web-dev-sdk';
 import { initKnowledge, type KnowledgeApi } from './knowledge';
 import { initVerification, type VerificationApi, type VRunDetail } from './verification';
+import { initRbx, type RbxApi } from './rbx';
 
 const PORT = parseInt(process.env.AGENT_PORT ?? '3003', 10);
 const ADMIN_PORT = parseInt(process.env.AGENT_ADMIN_PORT ?? '3004', 10);
@@ -688,12 +689,13 @@ const webSockets = new Map<Socket, { paired: boolean; token: string | null }>();
  * the LAST evaluation wins, and every reader (fresh or stale) sees the
  * process-wide truth instead of a captured binding. */
 const gBridge = globalThis as any;
+let rbxApiRef: RbxApi | null = null; // Roblox Studio bridge (HTTP /rbx/* on :3005)
 function publishBridgeLiveness() {
   gBridge.__bridgeSocketGet = () => vscodeSocket;
   gBridge.__bridgeOnline = false;
   if (gBridge.__bridgeOnlineTimer) clearInterval(gBridge.__bridgeOnlineTimer);
   gBridge.__bridgeOnlineTimer = setInterval(() => {
-    gBridge.__bridgeOnline = !!vscodeSocket && !!vscodeSocket.connected;
+    gBridge.__bridgeOnline = (!!vscodeSocket && !!vscodeSocket.connected) || (rbxApiRef?.alive() ?? false);
   }, 2000);
 }
 publishBridgeLiveness();
@@ -720,10 +722,13 @@ async function getZAI() {
 }
 
 function statusPayload() {
+  const rbxLive = rbxApiRef?.alive() ?? false;
   return {
-    connected: !!vscodeSocket,
+    connected: !!vscodeSocket || rbxLive,
+    client: vscodeSocket ? 'vscode' : (rbxLive ? 'roblox' : null),
     workspaceName: state.workspace?.name ?? null,
-    workspaceOnline: !!vscodeSocket,
+    workspaceOnline: !!vscodeSocket || rbxLive,
+    roblox: rbxApiRef?.info() ?? null,
     running,
     queued: queue.length,
     webClients: webSockets.size,
@@ -817,8 +822,14 @@ function activityForWeb(paired: boolean): ActivityEntry[] {
 function execToolViaVscode(name: string, args: any): Promise<ToolOutcome> {
   return new Promise((resolve) => {
     const sock = bridgeSocket();
+    // Roblox Studio plugin (HTTP long-poll) takes the tools when it is the
+    // live workspace client and VS Code is not connected.
+    if ((!sock || !sock.connected) && rbxApiRef?.alive()) {
+      rbxApiRef.execTool(name, args).then(resolve);
+      return;
+    }
     if (!sock || !sock.connected) {
-      resolve({ ok: false, result: 'Workspace is not connected (VS Code offline).' });
+      resolve({ ok: false, result: 'Workspace is not connected (VS Code offline, Roblox Studio offline).' });
       return;
     }
     const callId = shortId();
@@ -1027,7 +1038,8 @@ let treeVersion = 0; // bumped on every accepted tree (real or fallback)
 
 function requestTreeRefresh(waitMs = 25_000): Promise<any | null> {
   return new Promise((resolve) => {
-    if (!vscodeSocket || !vscodeSocket.connected) {
+    const rbxLive = rbxApiRef?.alive() ?? false;
+    if (!vscodeSocket && !rbxLive) {
       resolve(null);
       return;
     }
@@ -1038,7 +1050,8 @@ function requestTreeRefresh(waitMs = 25_000): Promise<any | null> {
       resolve(treeVersion > versionAtStart ? treeCache : treeCache);
     }, waitMs);
     treeWaiters.push({ resolve, timer });
-    vscodeSocket.emit('fs:refresh');
+    if (vscodeSocket && vscodeSocket.connected) vscodeSocket.emit('fs:refresh');
+    else rbxApiRef?.requestTree(); // plugin rescans + POSTs /rbx/tree → onWorkspaceTree wakes waiters
   });
 }
 
@@ -1048,10 +1061,13 @@ function requestTreeRefresh(waitMs = 25_000): Promise<any | null> {
  * back to synthesizing one from the list_files text output.
  */
 async function ensureTree(): Promise<any | null> {
-  if (treeCache || !vscodeSocket || !vscodeSocket.connected) return treeCache;
+  const rbxLive = rbxApiRef?.alive() ?? false;
+  if (treeCache || (!vscodeSocket && !rbxLive)) return treeCache;
   const versionAtStart = treeVersion;
-  // 1) ask the extension directly (0.4.0 answers with workspace:tree)
-  vscodeSocket.emit('fs:refresh');
+  // 1) ask the live client directly (extension answers workspace:tree;
+  //    the Roblox plugin answers by POSTing /rbx/tree)
+  if (vscodeSocket && vscodeSocket.connected) vscodeSocket.emit('fs:refresh');
+  else rbxApiRef?.requestTree();
   await new Promise((r) => setTimeout(r, 3000));
   if (treeVersion > versionAtStart) return treeCache;
   // 2) legacy fallback — build a tree from list_files text
@@ -1143,6 +1159,35 @@ function onWorkspaceTree(payload: any) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Roblox Studio bridge (rbx.ts) — the .rbxm plugin connects through   */
+/* the Caddy gateway (POST /rbx/*?XTransformPort=3005) and takes the    */
+/* workspace slot exactly like the VS Code extension does. When it is   */
+/* the live client, tools/tree/pairing all route through it.            */
+/* ------------------------------------------------------------------ */
+function resetWorkspaceSlot(name: string, ws: any) {
+  state.workspace = ws;
+  state.history = [];
+  activity.length = 0; // the journal belongs to the workspace
+  persistActivity();
+  treeCache = null;
+  saveJson(TREE_FILE, null); // clear the persisted tree too
+  skillsScan = { skills: [], scannedAt: Date.now(), online: false, note: 'Skills are not available on the Roblox Studio workspace.' };
+  persistState();
+  broadcastPaired('skill:list', { skills: [], scannedAt: skillsScan.scannedAt, online: false, note: skillsScan.note });
+  broadcastPaired('workspace:tree', { name, tree: null, stats: null });
+}
+
+const rbxApi = initRbx({
+  getWorkspace: () => state.workspace,
+  vscodeConnected: () => !!vscodeSocket && !!vscodeSocket.connected,
+  resetWorkspaceSlot,
+  logActivity: (e) => logActivity(e),
+  emitStatus: () => emitStatus(),
+  onTree: (payload) => onWorkspaceTree(payload),
+});
+rbxApiRef = rbxApi;
+
+/* ------------------------------------------------------------------ */
 /* Socket server                                                       */
 /* ------------------------------------------------------------------ */
 const httpServer = createServer();
@@ -1211,6 +1256,8 @@ io.on('connection', (socket) => {
       }
       vscodeSocket = socket;
       gBridge.__bridgeOnline = true;
+      // VS Code takes over the bridge — any live Roblox Studio session is evicted
+      rbxApi.evict('VS Code took over the bridge connection.');
       persistState();
 
       socket.emit('vscode:registered', { name, persistent });
@@ -1319,9 +1366,13 @@ io.on('connection', (socket) => {
       socket.emit('skill:list', { skills: skillsForWeb(), scannedAt: skillsScan.scannedAt, online: skillsScan.online, note: skillsScan.note });
       socket.emit('knowledge:state', knowledge.stateForWeb());
       socket.emit('verification:state', verification.stateForWeb());
-      void scanWorkspaceSkills(false); // background refresh if stale — broadcasts a fresh list when it scans
-      void knowledge.sync('system', 'System'); // background re-sync — broadcasts knowledge:state when done
-      void verification.sync('system', 'System'); // re-sync — broadcasts verification:state when done
+      // knowledge/verification/skills live in the CODE workspace's folders —
+      // the Roblox Studio client has none, so skip syncing while it owns the slot
+      if (!rbxApiRef?.alive()) {
+        void scanWorkspaceSkills(false); // background refresh if stale — broadcasts a fresh list when it scans
+        void knowledge.sync('system', 'System'); // background re-sync — broadcasts knowledge:state when done
+        void verification.sync('system', 'System'); // re-sync — broadcasts verification:state when done
+      }
     }
     console.log(`[web] client connected (paired=${paired})`);
 
@@ -1343,9 +1394,11 @@ io.on('connection', (socket) => {
         socket.emit('skill:list', { skills: skillsForWeb(), scannedAt: skillsScan.scannedAt, online: skillsScan.online, note: skillsScan.note });
         socket.emit('knowledge:state', knowledge.stateForWeb());
         socket.emit('verification:state', verification.stateForWeb());
-        void knowledge.sync('system', 'System');
-        void verification.sync('system', 'System');
-      void scanWorkspaceSkills(false); // background refresh if stale — broadcasts a fresh list when it scans
+        if (!rbxApiRef?.alive()) {
+          void knowledge.sync('system', 'System');
+          void verification.sync('system', 'System');
+          void scanWorkspaceSkills(false); // background refresh if stale — broadcasts a fresh list when it scans
+        }
         logActivity({
           source: 'system',
           actor: 'System',
@@ -1627,7 +1680,9 @@ const adminServer = createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/status') {
       sendJson(res, 200, {
         ok: true,
-        connected: !!vscodeSocket,
+        connected: !!vscodeSocket || rbxApiRef!.alive(),
+        client: vscodeSocket ? 'vscode' : (rbxApiRef!.alive() ? 'roblox' : null),
+        roblox: rbxApiRef!.info(),
         workspaceName: state.workspace?.name ?? null,
         pairingCode: state.workspace?.pairingCode ?? null,
         webClients: webSockets.size,
@@ -1919,6 +1974,7 @@ const adminServer = createServer(async (req, res) => {
         socketSet: !!sock,
         socketConnected: !!sock?.connected,
         bridgeOnlineFlag: bridgeOnline(),
+        robloxBridge: { alive: rbxApiRef!.alive(), info: rbxApiRef!.info() },
         verificationOnline: verification.stateForWeb().online,
         knowledgeOnline: knowledge.summary().online,
       });
@@ -1950,6 +2006,7 @@ httpServer.listen(PORT, () => {
 function shutdown() {
   try { httpServer.close(); } catch { /* noop */ }
   try { adminServer.close(); } catch { /* noop */ }
+  try { gBridge.__rbxServer?.close(); } catch { /* noop */ }
   setTimeout(() => process.exit(0), 300);
 }
 

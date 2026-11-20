@@ -1,0 +1,17 @@
+V3 Prisma version: 6.19.2 (Z.ai sandbox VM, bun) — supplementary evidence, NOT executed on the user's machine
+
+V3 rows=10:
+V3   loop pattern:   11 queries (children seen: 30)
+V3   include pattern: 2 query(ies) (children loaded: 30)
+V3   loop first queries: ["SELECT `main`.`Parent`.`id`, `main`.`Parent`.`name` FROM `main`.`Parent` WHERE 1=1 LIMIT ? OFFSET ?","SELECT `main`.`Child`.`id`, `main`.`Child`.`v`, `main`.`Child`.`parentId` FROM `main`.`Child` WHERE `main`.`Ch"]
+V3   include actual SQL: ["SELECT `main`.`Parent`.`id`, `main`.`Parent`.`name` FROM `main`.`Parent` WHERE 1=1 LIMIT ? OFFSET ?","SELECT `main`.`Child`.`id`, `main`.`Child`.`v`, `main`.`Child`.`parentId` FROM `main`.`Child` WHERE `main`.`Child`.`parentId` IN (?,?,?,?,?,?,?,?,?,?) LIMIT ? OFFSET ?"]
+
+V3 rows=100:
+V3   loop pattern:   101 queries (children seen: 300)
+V3   include pattern: 2 query(ies) (children loaded: 300)
+V3   loop first queries: ["SELECT `main`.`Parent`.`id`, `main`.`Parent`.`name` FROM `main`.`Parent` WHERE 1=1 LIMIT ? OFFSET ?","SELECT `main`.`Child`.`id`, `main`.`Child`.`v`, `main`.`Child`.`parentId` FROM `main`.`Child` WHERE `main`.`Ch"]
+V3   include actual SQL: ["SELECT `main`.`Parent`.`id`, `main`.`Parent`.`name` FROM `main`.`Parent` WHERE 1=1 LIMIT ? OFFSET ?","SELECT `main`.`Child`.`id`, `main`.`Child`.`v`, `main`.`Child`.`parentId` FROM `main`.`Child` WHERE `main`.`Child`.`parentId` IN (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,"]
+
+V3 verdict: loop query count grows with rows = true (11 -> 101); include query count constant = true (2 -> 2)
+V3 SQL shape of include on Prisma 6.19.2 + SQLite: 2 queries — multiple batched queries (NOT a single JOIN)
+V3-PRISMA-NPLUS1-CONFIRMED

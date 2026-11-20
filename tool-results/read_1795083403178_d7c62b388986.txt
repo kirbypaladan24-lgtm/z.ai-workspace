@@ -1,0 +1,256 @@
+     1→     1→#!/usr/bin/env node
+     2→     2→/**
+     3→     3→ * revise-knowledge.mjs — technical-review revisions for the candidate batch
+     4→     4→ * EXP-000008..012 (second curation pass over the seed library).
+     5→     5→ *
+     6→     6→ * What this pass does (and deliberately does NOT do):
+     7→     7→ *
+     8→     8→ *   DOES  propose a v2 for each of the five candidates through the standard
+     9→     9→ *         /knowledge/propose gate — originals stay intact in the version
+    10→    10→ *         history (and, for record-level corrections, in recordFieldChanges).
+    11→    11→ *   DOES  attach a per-record VERIFICATION PLAN, marked PLANNED — NOT
+    12→    12→ *         EXECUTED. No documentation was inspected and no experiment was
+    13→    13→ *         run while writing these revisions; the plans describe what
+    14→    14→ *         evidence WOULD validate each claim class.
+    15→    15→ *   NEVER runs verification checks (that would auto-promote through the
+    16→    16→ *         gate — i.e. automatic approval, which the owner forbade).
+    17→    17→ *   NEVER performs owner actions (approve/reject are dashboard-only).
+    18→    18→ *
+    19→    19→ * Every record stays candidate/pending after this script; promotion happens
+    20→    20→ * only after the plans produce evidence AND the owner reviews it.
+    21→    21→ *
+    22→    22→ * Idempotent: a record that already carries more than one version is skipped,
+    23→    23→ * so re-running on an already-revised store is a no-op.
+    24→    24→ *
+    25→    25→ * Usage: node scripts/revise-knowledge.mjs   (targets the admin API on :3004)
+    26→    26→ */
+    27→    27→
+    28→    28→const API = process.env.BRIDGE_ADMIN ?? 'http://localhost:3004';
+    29→    29→
+    30→    30→/* Field size limits enforced by the service (client-side guard so a silent
+    31→    31→ * server-side truncation can never mangle a revision unnoticed). */
+    32→    32→export const LIMITS = {
+    33→    33→  title: 300,
+    34→    34→  problemSummary: 2000,
+    35→    35→  symptoms: 2000,
+    36→    36→  rootCause: 2000,
+    37→    37→  solutionSteps: 6000,
+    38→    38→  environment: 1000,
+    39→    39→  applicableVersions: 500,
+    40→    40→  limitations: 1000,
+    41→    41→  compatibilityNotes: 1000,
+    42→    42→  reason: 1000,
+    43→    43→};
+    44→    44→
+    45→    45→/* Defensive identity check: prefixes shared by the v1 and intended v2 titles,
+    46→    46→ * so the script refuses to revise the wrong record even after IDs shift. */
+    47→    47→export const EXPECT = {
+    48→    48→  'EXP-000008': 'ML debugging: network does not learn',
+    49→    49→  'EXP-000009': 'ML triage: read the loss curve',
+    50→    50→  'EXP-000010': 'Database performance: N+1 queries',
+    51→    51→  'EXP-000011': 'AI-operator self-correction: verify an API exists',
+    52→    52→  'EXP-000012': 'AI-operator self-correction: minimal surgical edits',
+    53→    53→};
+    54→    54→
+    55→    55→/* ------------------------------------------------------------------ */
+    56→    56→/* v2 revision proposals                                               */
+    57→    57→/* ------------------------------------------------------------------ */
+    58→    58→
+    59→    59→export const REVISIONS = [
+    60→    60→  {
+    61→    61→    id: 'EXP-000008',
+    62→    62→    propose: {
+    63→    63→      problemSummary:
+    64→    64→        'Engineers and AI operators burn hours tuning architecture, optimizers and hyperparameters on networks that have an implementation bug. The highest-ROI FIRST test — can the network memorize a tiny batch? — is skipped, and the session spirals into exactly the overthinking this knowledge library exists to prevent. Failure to overfit a small batch is STRONG EVIDENCE for a mechanical bug, not proof: insufficient steps, too-low LR or (rarely) genuine capacity limits can also fail the test — the protocol below discriminates between them.',
+    65→    65→      rootCause:
+    66→    66→        'The single-batch test is a discriminator between two failure families: (1) mechanical bugs — labels misaligned with inputs, loss applied to the wrong tensor, detach() breaking gradients, wrong loss for the label dtype, preprocessing destroying the signal — the common case; (2) convergence limits — too-few steps, too-low LR, rarely capacity. If the network cannot memorize a few samples even after training longer at a raised LR, family (1) is near-certain. Treating every failure-to-learn as family (2) — tuning hyperparameters against a broken pipeline — is the anti-pattern.',
+    67→    67→      solutionSteps:
+    68→    68→        '1) Take ~10 training samples that SPAN the classes (>= 2 per class). A single-class batch voids the test: a constant predictor then reaches 100% accuracy with zero learning. 2) Disable augmentation / dropout / weight decay for the test and train ONLY on those samples. PASS CRITERIA are scale-relative, never a fixed constant: (a) batch accuracy reaches 100% (classification), or predictions match targets within target scale (regression); (b) loss falls far below its step-0 value and plateaus near the floor a memorizing model can reach — for cross-entropy that floor is ~0 and the step-0 value should be near ln(K) for K classes. A fixed threshold like loss < 1e-2 is NOT a valid criterion: loss scale depends on the loss family and target scale (MSE on targets in the 1000s may never reach 1e-2 even when fully memorized). 3) If the batch will not overfit after training longer at a raised LR, hunt the mechanical bug: (a) print tensor SHAPES at every boundary; (b) verify labels align with inputs — if data was shuffled, confirm inputs and labels were shuffled TOGETHER; (c) verify the loss receives raw logits and the label dtype it expects (e.g. CrossEntropyLoss expects integer class indices and applies softmax internally — doc-verifiable per framework version, not verified here); (d) check GRADIENT HEALTH, not all-non-zero: assert (i) no NaN/Inf grads anywhere and (ii) every layer that should train has at least one non-zero grad. Individual zero grads are NORMAL and expected — dead ReLU units, embedding rows absent from the tiny batch, frozen parameters (requires_grad=False gives .grad = None by design), unused graph branches. Asserting every parameter is non-zero is a false-positive generator, not a health check. (e) print the inputs themselves — is the signal actually present? 4) Only after the tiny batch overfits, scale to full data. If full-data training misbehaves while the tiny batch overfits cleanly, that POINTS TO generalization / regularization / data-pipeline causes (augmentation too strong, LR mismatched to the new batch size, shuffle or scaling bug appearing at scale) rather than a forward/backward bug — confirm by disabling augmentation and re-running before concluding.\n\nVERIFICATION PLAN (PLANNED — NOT EXECUTED; no evidence exists for v2 claims yet): C1 experimental (python3, user machine): compute chance-level CE = -log(1/K) for K=2 and K=10 (expect ln 2 = 0.6931, ln 10 = 2.3026) and CE of a near-one-hot correct prediction (approaches 0) — validates the pass-criteria baselines. C2 experimental (python3): a constant predictor scores 100% accuracy on a single-class batch but only ~1/K on a class-spanning batch — validates the class-spanning requirement. C3 doc-based (NOT yet inspected): label-dtype and internal-softmax expectations of the loss actually used, against that framework version\'s official docs. C4 experimental (requires a DL framework; NOT available on this machine — candidate env: a torch/tf sandbox): run this protocol on a known-correct small network (must PASS) and on a label-shuffled copy (must FAIL) — validates the discriminating power of the test itself.',
+    69→    69→      environment:
+    70→    70→        'Any deep learning framework — the highest-ROI EARLY debugging step in NN work (run before any tuning)',
+    71→    71→      limitations:
+    72→    72→        'Failure to overfit a tiny batch is strong evidence of a mechanical bug, not proof — rule out too-few steps, too-low LR and (rarely) capacity by training longer and wider first. Very large models: reduce width or freeze early layers — the point is mechanical correctness, not convergence speed. RL analogue: random-agent returns on a trivially small environment before any training. Gradient checks verify FLOW, not mathematical correctness — a wrong-but-flowing loss passes them. None of v2\'s criteria have been experimentally verified yet (see plan).',
+    73→    73→      compatibilityNotes:
+    74→    74→        'Claim types in v2: pass criteria = analytically derivable, C1/C2-experimental; loss-dtype expectations = doc-based (C3, not yet inspected); test discriminating power = experimental (C4, needs a DL framework); gradient-health semantics = doc-verifiable framework behavior. Zero claims carry execution evidence as of this revision.',
+    75→    75→      reason:
+    76→    76→        'v2 technical review: (1) replaced the absolute loss<1e-2 pass criterion with scale-relative criteria (100% batch accuracy; loss vs ln(K) baseline and memorization floor) — fixed thresholds are invalid across loss families and target scales; (2) required a class-spanning sample — a single-class batch lets a constant predictor pass; (3) corrected the gradient assertion — individual zero grads are legitimate (dead ReLUs, absent embedding rows, frozen params); the valid checks are no-NaN/Inf plus per-layer grad flow; (4) retracted the NOT-capacity-or-hyperparameters absolute — the test discriminates, it does not prove. Verification plan attached; NOT executed.',
+    77→    77→    },
+    78→    78→  },
+    79→    79→  {
+    80→    80→    id: 'EXP-000009',
+    81→    81→    propose: {
+    82→    82→      title:
+    83→    83→        'ML triage: read the loss curve before changing anything — each shape narrows to a SHORT CANDIDATE LIST that must be confirmed by a check; a shape alone is never a diagnosis',
+    84→    84→      problemSummary:
+    85→    85→        'When training misbehaves, operators jump between speculative fixes (shotgun debugging) instead of reading the loss curve. A curve SHAPE narrows the cause to a small candidate set — it is a CLUE, not a verdict: the same shape is produced by several distinct causes, and each candidate must be confirmed or eliminated by its listed check before you act on it. This record is the triage table: match the shape, run the cheapest discriminating checks, confirm, then fix.',
+    86→    86→      rootCause:
+    87→    87→        'A loss-curve shape is diagnostic evidence that raises the probability of a small set of candidate causes; it is never sufficient by itself for a root-cause conclusion. Example: a flat loss can mean not-learning (value at chance level), already-solved (value near zero), or constant labels (value at the class-prior floor) — the loss VALUE relative to the analytic baseline disambiguates what the shape alone cannot. The method: match shape, get the candidate list, run the cheapest discriminating check first, and only treat a cause as established when its check confirms it.',
+    88→    88→      solutionSteps:
+    89→    89→        'STEP 0 for every flat or plateaued curve: compare the loss VALUE to the analytic baseline. K-class cross-entropy constant-predictor floor = ln(K) (ln 2 = 0.6931 binary; ln 10 = 2.3026 for 10 classes); majority-class floor = class-prior entropy; regression floor = mean-predictor MSE. Flat AT baseline = not learning; flat NEAR ZERO = likely already fit (check a metric, not loss); flat BELOW baseline at a mediocre value = partial learning. SHAPES -> CANDIDATES (confirm before acting): NaN/Inf EARLY -> (a) inf/nan already in the input batch — print per-feature min/max, cheapest check; (b) numeric fault in the loss itself — log(0), softmax overflow (see the log-sum-exp record); (c) LR too high — grad norms at the last healthy step: exploding norms support it, sane norms point back to (a)/(b). Dividing LR by 10 is a MITIGATION to stop the bleeding, not a diagnosis. FLAT FROM STEP 0 -> (a) baseline comparison above; (b) optimizer not stepping or LR not loaded (loss would not even drift — verify optimizer.step() is called and the LR actually in use); (c) loss/label mismatch (regression loss on class labels); (d) broken graph (detached tensors); (e) dead ReLUs — per-layer activation stats: SOME dead units are normal, an ALL-dead layer is not. EXPLODES AFTER N GOOD STEPS -> (a) a single poisoned batch — reproduce with a fixed seed / fixed batch order; if the explosion moves with the shuffle, it is data; (b) gradient explosion — log per-step grad norms; a growing trend confirms; (c) LR schedule stepping too far — inspect the actual LR value at the divergence step. Clipping is an immediate stabilizer; find WHY norms grew (init, LR, loss reduction) before calling it fixed. TRAIN DOWN, VAL UP -> overfitting is the LEADING candidate, not the only one; confirm alternatives first: (a) eval-pipeline parity — same preprocessing, no train-only augmentation at eval; (b) train/val distribution shift — compare label and feature distributions. If confirmed as overfitting, respond in ROI order: more or augmented data, dropout, weight decay, early stopping — architecture changes LAST. BOTH FLAT AT MEDIOCRE VALUE -> (a) labels near-constant — compute the majority-class baseline accuracy; if your metric matches it, the model learned only the prior; (b) inputs uninformative — print samples and audit the feature pipeline; (c) LR too low or capacity too small — briefly raise LR 10x: if the loss finally moves, it was LR. When the shape alone is ambiguous: log per-layer activation AND gradient norms; look for the layer where they hit zero or blow up.\n\nVERIFICATION PLAN (PLANNED — NOT EXECUTED; no evidence exists for v2 claims yet): C1 experimental (python3, user machine): compute -log(1/K) for K=2,10 and the CE of a constant p=1/K prediction (must equal ln K) — validates every baseline number quoted above. C2 experimental (python3): CE of a near-one-hot confident correct prediction approaches 0 — validates the flat-near-zero interpretation. C3 doc-based (NOT yet inspected): clipping and loss-dtype semantics of the framework in use. C4 practice-based: the shape->candidate mappings are community debugging practice, not experimentally tested claims — they will cite specific inspected sources only after those sources are actually read; until then treat them as priors.',
+    90→    90→      limitations:
+    91→    91→        'Curve shapes are evidence, not verdicts — every mapping above lists candidates that MUST be confirmed by their check before action. Shapes interact with LR schedules: do the first diagnosis at a constant LR, then re-introduce warmup/decay. Baselines are exact only for the stated losses — recompute for a different loss family before comparing. The shape->candidate lists are practice-based priors, not verified facts (see plan C4).',
+    92→    92→      compatibilityNotes:
+    93→    93→        'Claim types in v2: baseline numbers = analytically derivable, C1/C2-experimental; framework semantics (clipping, dtypes) = doc-based (C3, not yet inspected); shape->candidate mappings = practice-based priors (C4, sources not yet read). Zero claims carry execution evidence as of this revision.',
+    94→    94→      reason:
+    95→    95→        'v2 technical review: reframed every shape->cause mapping as CANDIDATES requiring a confirming check (a shape is a clue, not a root cause); added analytic-baseline comparison (ln K / prior entropy / mean-predictor MSE) as step 0 to disambiguate flat losses; reclassified LR-division and grad-clipping as mitigations while the cause is confirmed, not diagnoses; added eval-pipeline parity and distribution-shift checks before treating train-val divergence as overfitting; required grad-norm/seed evidence before accepting gradient explosion or a poisoned batch. Verification plan attached; NOT executed.',
+    96→    96→    },
+    97→    97→  },
+    98→    98→  {
+    99→    99→    id: 'EXP-000010',
+   100→   100→    propose: {
+   101→   101→      title:
+   102→   102→        "Database performance: N+1 queries — latency grows with row count; MEASURE query count first, then batch reads (Prisma include / WHERE IN). SQLite 'database is locked' is a separate write-transaction problem",
+   103→   103→      problemSummary:
+   104→   104→        "List endpoints that run 1 query for the rows plus N lazy queries for each row relation become O(N) round-trips: 100 rows can mean 101 queries. Symptom: page latency grows linearly with row count — fast locally, slow with real data. SEPARATE failure mode, frequently confused with it: SQLite 'database is locked' errors — those come from concurrent or long-held WRITE transactions, not from read-side N+1; the two need different fixes (see rootCause).",
+   105→   105→      symptoms:
+   106→   106→        "endpoint latency scales with the number of rows returned; query log shows the same query repeated dozens of times per request; page loads fine with 10 rows and crawls at 1000. SQLite 'database is locked' under concurrency is a DIFFERENT problem — write-transaction contention — addressed separately in solutionSteps step 7.",
+   107→   107→      rootCause:
+   108→   108→        "Accessing a relation inside a loop triggers one lazy query per row; the work can be fetched in a bounded number of round-trips if the ORM is asked in one call. The exact mechanism (a JOIN vs a constant number of batched queries) DEPENDS on the ORM, its version, the provider (SQLite/Postgres) and the relation shape — do not assume it; measure it with query logging. SQLite locking, corrected: N+1 READS cause latency, not lock errors. In SQLite's rollback-journal model a write transaction holds RESERVED and takes the database lock at commit, blocking other WRITERS; WAL mode allows readers during a write. 'database is locked' therefore indicates concurrent or long-held writes (or a missing busy timeout). This locking explanation is prior knowledge REQUIRING doc + experimental verification before this record is promoted (see plan).",
+   109→   109→      solutionSteps:
+   110→   110→        "1) MEASURE FIRST: enable query logging (Prisma: new PrismaClient({ log: ['query'] })) and COUNT queries per request at TWO row counts (e.g. 10 and 100). N+1 shows as the count growing with rows; the goal is a count CONSTANT w.r.t. row count. 2) Replace loop-accessed relations with one batched read: db.post.findMany({ include: { author: true } }). CAUTION: 'include = one JOIN' is NOT guaranteed — relation loading may compile to a JOIN or to a small number of batched queries depending on ORM version, provider and relation shape. The verifiable requirement is the CONSTANT QUERY COUNT measured in step 1, not a presumed SQL shape. 3) Key lists: db.user.findMany({ where: { id: { in: ids } } }) then group in memory. 4) GraphQL servers: DataLoader coalesces same-tick lookups. 5) VERIFY the fix: recount queries at both row counts — constant count with growing rows = fixed; anything else is not. 6) Over-fetching: shape with select. Nesting depth of ANY level is a COST signal to examine (query complexity, payload size); the response ladder in order of preference: shape with select -> split into separate queries -> push aggregation into the DB (groupBy / raw SQL) -> ONLY for a measured, reproducible hot path: denormalize, accepting an explicit consistency trade-off. There is NO depth threshold that by itself proves denormalization is required. 7) SQLite lock errors are NOT fixed by batching reads. Check for: concurrent writers, long-running or interactive write transactions, missing busy timeout. Candidate mitigations to verify on your stack: PRAGMA journal_mode=WAL; busy_timeout; keeping write transactions short.\n\nVERIFICATION PLAN (PLANNED — NOT EXECUTED; no evidence exists for v2 claims yet): V1 doc-based (NOT yet inspected): SQLite official docs on the rollback-journal lock states (RESERVED / PENDING / EXCLUSIVE) and WAL-mode reader/writer concurrency — confirm the corrected locking explanation. V2 experimental (sqlite3 available on the user machine; run in a temp dir via mktemp -d so nothing is written into the workspace): open two sqlite3 sessions on one DB; BEGIN a write in one; attempt a write in the other — observe the lock error; then set journal_mode=WAL and observe the reader proceed during a pending write. V3 experimental (requires Node + Prisma — NOT on the user machine; candidate env: the Z.ai sandbox with its pinned Prisma version): seed a small schema, count queries for findMany + include at 10 vs 100 rows with log: ['query']; assert constant count for include and linear count for the loop pattern. V4 doc-based (NOT yet inspected): Prisma docs on query logging and SQLite concurrency for the INSTALLED major version. This record must not be promoted until V1-V3 have produced evidence.",
+   111→   111→      environment:
+   112→   112→        'ORM-backed list endpoints generally; Prisma specifically (its relation-loading behavior must be MEASURED on the installed version — including by this record\'s own standard, no version-general claim here is verified); SQLite and Postgres differ in locking/concurrency semantics',
+   113→   113→      applicableVersions:
+   114→   114→        'Prisma behavior varies by major version and provider — verify each claim via query logging on the installed version; nothing version-specific has been verified for this record yet',
+   115→   115→      limitations:
+   116→   116→        'No Prisma version\'s relation-loading mechanism has been verified for this record — no docs inspected, no experiment run (see plan V3/V4). The SQLite locking explanation is prior knowledge pending V1 (docs) + V2 (experiment). The ~3-queries heuristic is a rule of thumb, not a rule. Denormalization is deliberately last on the response ladder: it is a design change with consistency costs, justified only by a measured hot path — no depth threshold alone mandates it.',
+   117→   117→      compatibilityNotes:
+   118→   118→        'Claim types in v2: SQLite lock model = doc-based V1 + experimental V2 (neither done); Prisma batching outcome = experimental V3 + doc-based V4 (neither done); the ~3-queries threshold = labeled heuristic; denormalization rule REMOVED (unsupported). Zero claims carry execution evidence as of this revision.',
+   119→   119→      reason:
+   120→   120→        "v2 technical review: (1) removed the unsupported '>2 levels of nested include = denormalize' rule — depth is a cost signal examined with a response ladder, not a schema verdict; (2) corrected 'include = one join' to 'constant query count is the requirement; SQL shape is version/provider/relation-dependent — measure, do not assume'; (3) SEPARATED SQLite 'database is locked' from N+1 (write-transaction contention vs read latency) with WAL / busy_timeout / short write transactions as candidate mitigations; (4) scoped all Prisma claims to measurement on the installed version. No docs inspected, no experiments run — verification plan V1-V4 attached; NOT executed.",
+   121→   121→    },
+   122→   122→  },
+   123→   123→  {
+   124→   124→    id: 'EXP-000011',
+   125→   125→    propose: {
+   126→   126→      title:
+   127→   127→        'AI-operator self-correction: verify an API exists in the INSTALLED project before using it — hallucinated APIs are a recurrent, high-severity agent failure mode',
+   128→   128→      problemSummary:
+   129→   129→        "LLM agents (including the operator writing this) confidently use APIs from training memory: functions that do not exist in the installed version, options added in later releases, or methods from a different library with the same name. The code looks plausible and fails at runtime with 'x.y is not a function'. This is a RECURRENT, high-severity failure mode of agent-written code and one of the cheapest to prevent. (Frequency ranking is unquantified — no dataset ranks agent bug sources, so v1's '#1' claim is retracted.)",
+   130→   130→      rootCause:
+   131→   131→        'Model memory blends versions, libraries and APIs into plausible-looking calls. The project\'s lockfile, installed node_modules and type definitions are ground truth; memory is only a prior, never evidence. Three layers are commonly confused: what the DOCS describe (latest release), what the lockfile RESOLVED (a specific version), and what node_modules actually CONTAINS (what runs). Verification must walk down that chain — each layer can differ from the others.',
+   132→   132→      solutionSteps:
+   133→   133→        'Before using any non-trivial API, verify it against the INSTALLED project, in this order: 1) DEPENDENCY: the package is in package.json AND the lockfile (package-lock.json / pnpm-lock.yaml / bun.lockb) — the lockfile records the exact RESOLVED version; docs describe the latest release, which may be newer. 2) INSTALLED VERSION: read node_modules/<pkg>/package.json version — the registry copy and the installed copy can differ; the installed one is what runs. 3) SYMBOL AND SIGNATURE at that version: check the package\'s entry .d.ts / exports map for the exact symbol — not just the name: parameter shapes and option keys drift across versions. A type check (tsc --noEmit, or the editor language server) is STRONGER than grep because it validates call shape, not just presence. 4) RUNTIME feature detection when behavior is version-dependent: guard with typeof obj.method === \'function\' before relying on it. 5) Prefer APIs already used elsewhere in THIS codebase (grep src/) — consistency with the project beats novelty. 6) If the project ships a component library (shadcn/ui in this stack), use its components instead of hand-rolling. 7) If the API is absent at the installed version, STOP and adapt to what exists — never invent an intermediate version of the library. Cost: seconds per check, versus hours of runtime debugging.\n\nVERIFICATION PLAN (PLANNED — NOT EXECUTED; no evidence exists for v2 claims yet): V1 experimental: demonstrate the full chain on a real installed project — package.json -> lockfile resolved version -> node_modules/<pkg>/package.json version (the sandbox has an installed project; the user workspace only if it has node_modules). V2 experimental (sandbox, TS available): tsc --noEmit flags a call to a nonexistent method on an installed package (negative control) and passes the correct call (positive control). V3 doc-based (NOT yet inspected): lockfile semantics of the project\'s package manager. The \'#1\' -> \'recurrent\' change REMOVES a claim rather than adding one and needs no evidence — the record now explicitly states the ranking is unquantified.',
+   134→   134→      limitations:
+   135→   135→        "The bridge tool run executes grep/read against the real workspace — make this check part of the preflight, not an afterthought. Type-checking assumes the project's TS setup is healthy; runtime guards add branches — use them where version drift is plausible. The verification chain is written for JS/TS projects; other ecosystems have the same three layers (manifest, lockfile, installed tree) under different names.",
+   136→   136→      compatibilityNotes:
+   137→   137→        'Claim types in v2: the three-layer docs/lockfile/installed distinction = doc-based V3 (not yet inspected) + demonstrable V1; type-check-beats-grep = testable V2 (not run); recurrent-and-high-severity = qualitative, no ranking claimed. Zero claims carry execution evidence as of this revision.',
+   138→   138→      reason:
+   139→   139→        "v2 technical review: (1) retracted the unsupported '#1 agent bug source' / 'single most common' superlative — no dataset ranks agent bug sources; replaced with 'recurrent, high-severity failure mode' and an explicit unquantified-frequency note; title and problemSummary corrected accordingly, originals preserved verbatim in recordFieldChanges; (2) upgraded installed-dependency verification from 'grep node_modules' to an ordered chain: package.json -> lockfile resolved version -> installed package.json version -> symbol AND signature at that version (type check > grep) -> runtime feature detection; (3) added the docs/latest vs lockfile/resolved vs installed/running distinction. Verification plan attached; NOT executed.",
+   140→   140→    },
+   141→   141→  },
+   142→   142→  {
+   143→   143→    id: 'EXP-000012',
+   144→   144→    propose: {
+   145→   145→      solutionSteps:
+   146→   146→        '1) Make the smallest edit that plausibly addresses the CAUSE (anchored edit, not file rewrite). 2) ONE change per cycle; re-run the exact failing check after each change — that result is the only progress signal. 3) SELECTIVE, SAFE ROLLBACK — never blanket restores: BEFORE the first edit, capture the pre-edit content of ONLY the file(s) you are about to touch (bridge read_file, or git diff to enumerate hunks). On a failed attempt, restore exactly what you changed: git restore -p (choose your hunks), a path-limited stash (git stash push -- <paths>), or re-apply the captured pre-edit content. NEVER run repo-wide git checkout . / git reset --hard — they destroy the user\'s unrelated uncommitted work. If the file had PRE-EXISTING uncommitted changes, prefer restoring just your hunks over any file-level restore. CONFIRM the rollback: re-run the exact failing check — the ORIGINAL error must reproduce; that is your known-green marker. 4) CONTINUATION CRITERIA — there is no fixed attempt count. Continue surgical attempts while: (a) each attempt tests a NEW hypothesis informed by the actual error text of the previous failure; (b) the diff stays anchored at the failure site; (c) the error is changing or moving (progress signal). STOP and surface the situation to the user when: attempts repeat the same hypothesis with no new information; the diff keeps growing past the causal site; or you can no longer attribute which change did what. 5) Re-read the file after editing to confirm the edit landed as intended. 6) Re-read the ACTUAL error text (not the assumed one) before each next attempt; reduce to a minimal reproduction when the system resists. 7) Reserve full-file rewrites for files whose STRUCTURE is itself the demonstrated cause — not merely because surgical attempts failed: require structural evidence or exhausted-information signals from step 4, and surface the rewrite decision to the user whenever the blast radius is non-trivial.\n\nVERIFICATION PLAN (PLANNED — NOT EXECUTED; no evidence exists for v2 claims yet): V1 experimental (git; scratch repo in a temp dir via mktemp -d so nothing is written into the user\'s workspace): seed a repo with pre-existing uncommitted changes; apply an agent-style edit; exercise the selective rollback (git restore -p / git stash push -- <path>) and verify the user\'s pre-existing changes SURVIVE while the agent\'s edit is gone; negative control: show that repo-wide git checkout . destroys them — the reason it is banned. V2 doc-based (NOT yet inspected): git restore -p and path-limited stash semantics. V3 practice-based: the continuation criteria are process guidance, not mechanically testable claims.',
+   147→   147→      limitations:
+   148→   148→        'This discipline is what the knowledge store records failed ATTEMPTS for: check the failed-attempt warnings during preflight so you do not repeat an approach that already failed in this workspace. Rollback safety depends on capturing pre-edit state BEFORE the first change — if that capture was skipped, content-level restore is guesswork: stop and ask. Git-based rollback must account for pre-existing uncommitted user work in the same files; when in doubt, capture file contents first, restore second. The continuation/stop criteria are judgment guidance, not a mechanical rule.',
+   149→   149→      compatibilityNotes:
+   150→   150→        'Claim types in v2: selective-rollback safety property = experimentally demonstrable (V1, not run); git flag semantics = doc-based (V2, not yet inspected); continuation criteria = practice-based process guidance (V3). The arbitrary two-attempt rewrite threshold was REMOVED. Zero claims carry execution evidence as of this revision.',
+   151→   151→      reason:
+   152→   152→        "v2 technical review: (1) removed the arbitrary 'two failed attempts -> rewrite / stop' threshold — continuation is governed by information gain: new hypothesis per attempt, anchored diff, error movement; stopping is triggered by repeated hypotheses, diff growth, or lost attribution, not a count; (2) replaced blanket 'git checkout/restore the file' with SELECTIVE rollback: pre-edit capture of touched files only, hunk-level or path-limited restore, explicit ban on repo-wide checkout / reset --hard, protection of pre-existing uncommitted user work, and rollback CONFIRMED by the original error reproducing; (3) rewrites now require structural evidence plus user visibility. Verification plan attached; NOT executed.",
+   153→   153→    },
+   154→   154→  },
+   155→   155→];
+   156→   156→
+   157→   157→/* ------------------------------------------------------------------ */
+   158→   158→/* Admin API helpers                                                   */
+   159→   159→/* ------------------------------------------------------------------ */
+   160→   160→
+   161→   161→async function post(path, body) {
+   162→   162→  const res = await fetch(API + path, {
+   163→   163→    method: 'POST',
+   164→   164→    headers: { 'content-type': 'application/json' },
+   165→   165→    body: JSON.stringify(body ?? {}),
+   166→   166→  });
+   167→   167→  return { status: res.status, data: await res.json().catch(() => ({})) };
+   168→   168→}
+   169→   169→
+   170→   170→async function get(path) {
+   171→   171→  const res = await fetch(API + path);
+   172→   172→  return { status: res.status, data: await res.json().catch(() => ({})) };
+   173→   173→}
+   174→   174→
+   175→   175→/* ------------------------------------------------------------------ */
+   176→   176→/* Revision runner                                                     */
+   177→   177→/* ------------------------------------------------------------------ */
+   178→   178→
+   179→   179→async function main() {
+   180→   180→  const { data: status } = await get('/knowledge');
+   181→   181→  if (!status?.ok) {
+   182→   182→    console.error('knowledge store unavailable:', status?.error ?? 'offline');
+   183→   183→    process.exit(1);
+   184→   184→  }
+   185→   185→  if (!status.online) {
+   186→   186→    console.error('knowledge store is OFFLINE (VS Code extension not connected) —');
+   187→   187→    console.error('revisions must persist to the workspace store; connect first.');
+   188→   188→    process.exit(1);
+   189→   189→  }
+   190→   190→  console.log(`knowledge store online · project: ${status.projectName}`);
+   191→   191→  console.log(`revising ${REVISIONS.length} candidate records (propose v2 only — no verify, no owner actions)\n`);
+   192→   192→
+   193→   193→  let revised = 0;
+   194→   194→  let skipped = 0;
+   195→   195→  let failed = 0;
+   196→   196→
+   197→   197→  for (const rev of REVISIONS) {
+   198→   198→    const { data: rec } = await get(`/knowledge/record?id=${rev.id}`);
+   199→   199→    const record = rec?.record;
+   200→   200→    if (!record) {
+   201→   201→      console.error(`[fail] ${rev.id}: record not found`);
+   202→   202→      failed++;
+   203→   203→      continue;
+   204→   204→    }
+   205→   205→    if (record.versions.length > 1) {
+   206→   206→      console.log(`[skip] ${rev.id}: already carries ${record.versions.length} versions (active v${record.activeVersion})`);
+   207→   207→      skipped++;
+   208→   208→      continue;
+   209→   209→    }
+   210→   210→    if (!record.title.startsWith(EXPECT[rev.id])) {
+   211→   211→      console.error(`[fail] ${rev.id}: identity mismatch — expected "${EXPECT[rev.id]}..." but found "${record.title.slice(0, 70)}..."`);
+   212→   212→      failed++;
+   213→   213→      continue;
+   214→   214→    }
+   215→   215→    let tooLong = false;
+   216→   216→    for (const [field, max] of Object.entries(LIMITS)) {
+   217→   217→      const v = rev.propose[field];
+   218→   218→      if (typeof v === 'string' && v.length > max) {
+   219→   219→        console.error(`[fail] ${rev.id}: field "${field}" is ${v.length} chars (service limit ${max}) — refusing to submit a silently-truncated revision`);
+   220→   220→        tooLong = true;
+   221→   221→      }
+   222→   222→    }
+   223→   223→    if (tooLong) {
+   224→   224→      failed++;
+   225→   225→      continue;
+   226→   226→    }
+   227→   227→
+   228→   228→    const { status: code, data } = await post('/knowledge/propose', { id: rev.id, ...rev.propose });
+   229→   229→    if (code === 200 && data.ok) {
+   230→   230→      revised++;
+   231→   231→      const fields = rev.propose.title || rev.propose.problemSummary
+   232→   232→        ? ' (record-level title/problemSummary corrected — originals preserved on the new version)'
+   233→   233→        : '';
+   234→   234→      console.log(`[ ok ] ${rev.id}: v${data.proposedVersion} proposed${fields}`);
+   235→   235→      console.log(`       status stays "${record.status}", active stays v${record.activeVersion}, v${data.proposedVersion} verification: pending`);
+   236→   236→    } else {
+   237→   237→      failed++;
+   238→   238→      console.error(`[fail] ${rev.id}: ${data.error ?? `HTTP ${code}`}`);
+   239→   239→    }
+   240→   240→  }
+   241→   241→
+   242→   242→  console.log(`\n${revised} revised · ${skipped} skipped · ${failed} failed`);
+   243→   243→  console.log('no verification checks were run and no owner actions were taken —');
+   244→   244→  console.log('all five records remain candidate/pending until the plans produce evidence and the owner reviews it.');
+   245→   245→  process.exit(failed > 0 ? 1 : 0);
+   246→   246→}
+   247→   247→
+   248→   248→/* main() runs only when this file is executed directly;
+   249→   249→ * repair-record-fields.mjs imports REVISIONS/EXPECT/LIMITS from here. */
+   250→   250→if (process.argv[1] && process.argv[1].endsWith('revise-knowledge.mjs')) {
+   251→   251→  main().catch((e) => {
+   252→   252→    console.error('revision run failed:', e);
+   253→   253→    process.exit(1);
+   254→   254→  });
+   255→   255→}
+   256→   256→

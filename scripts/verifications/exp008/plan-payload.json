@@ -1,0 +1,198 @@
+{
+ "experiments": "Eight single-purpose deterministic experiments, one per claim class (C1/C2 analytic baselines, C4a/C4b discriminating power at task-matched capacity, C4c capacity boundary, C5 threshold scale-dependence, C6 gradient-health semantics, C3 live documentation inspection). Pure-python stdlib only; fixed seeds; no workspace writes.",
+ "cases": [
+  {
+   "name": "C1 analytic baselines: chance CE = ln(K), confident CE -> 0",
+   "objective": "validate every baseline number the record quotes (ln2=0.693147, ln10=2.302585, near-one-hot CE approaching 0)",
+   "category": "validation",
+   "command": "python3 - <<'PYEOF'\nimport math, sys\n\nok = True\n# C1a: chance-level CE = -log(1/K) = ln(K) for K=2 and K=10\nfor K in (2, 10):\n    chance = -math.log(1.0 / K)\n    expect = math.log(K)\n    match = abs(chance - expect) < 1e-12\n    ok = ok and match\n    print(f\"C1 K={K} chance-CE={chance:.6f} ln(K)={expect:.6f} exact-match={match}\")\n\n# C1b: CE of a near-one-hot confident correct prediction approaches 0\np_correct = 1.0 - 1e-9\nce_conf = -math.log(p_correct)\nprint(f\"C1 near-one-hot CE={ce_conf:.9f}\")\nok = ok and ce_conf < 1e-6\n\n# C1c: constant p=1/K prediction on the true class = ln(K)\nK = 10\nce_const = -math.log(1.0 / K)\nprint(f\"C1 constant-predictor CE on true class={ce_const:.6f}\")\nok = ok and abs(ce_const - math.log(K)) < 1e-12\n\n# reference constants quoted in the knowledge record\nprint(f\"C1 ln2={math.log(2):.6f} ln10={math.log(10):.6f}\")\nok = ok and abs(math.log(2) - 0.693147) < 1e-5 and abs(math.log(10) - 2.302585) < 1e-5\n\nprint(\"C1-BASELINES-VERIFIED\" if ok else \"C1-BASELINES-FAILED\")\nsys.exit(0 if ok else 1)\nPYEOF",
+   "timeoutMs": 60000,
+   "expected": {
+    "expectedResult": "C1-BASELINES-VERIFIED with exact ln(K) matches",
+    "successCriteria": "exit 0, output contains C1-BASELINES-VERIFIED",
+    "failureCriteria": "any baseline mismatch or missing marker"
+   },
+   "criteria": {
+    "exitCode": 0,
+    "outputContains": [
+     "C1-BASELINES-VERIFIED"
+    ],
+    "outputNotContains": []
+   },
+   "flags": {
+    "critical": true,
+    "requiresNetwork": false,
+    "destructive": false
+   }
+  },
+  {
+   "name": "C2 class-spanning requirement: single-class batch voids the test",
+   "objective": "show a constant predictor scores 100% on a single-class batch but exactly 1/K on a class-spanning batch",
+   "category": "validation",
+   "command": "python3 - <<'PYEOF'\nimport sys\n\nok = True\n# A constant predictor always outputs class c.\n# Single-class batch (all labels = c): it scores 100% with zero learning.\n# Class-spanning balanced batch: it scores exactly 1/K.\nfor K, c in ((4, 2), (10, 7)):\n    single = [c] * 10                         # single-class batch\n    spanning = [i % K for i in range(K * 3)]  # 3 samples per class, spans all classes\n    acc_single = sum(1 for y in single if y == c) / len(single)\n    acc_span = sum(1 for y in spanning if y == c) / len(spanning)\n    expected_span = 1.0 / K\n    print(f\"C2 K={K} single-class-batch acc={acc_single * 100:.1f}PCT spanning-batch acc={acc_span * 100:.1f}PCT expected-chance={expected_span * 100:.1f}PCT\")\n    ok = ok and acc_single == 1.0 and abs(acc_span - expected_span) < 1e-12\n\n# A single-class batch therefore cannot detect failure-to-learn: the constant\n# predictor \"passes\" a 100%-accuracy criterion without any signal.\nprint(\"C2-SINGLE-CLASS-VOIDS-TEST: CONFIRMED\")\nprint(\"C2-CLASS-SPANNING-REQUIRED\")\nsys.exit(0 if ok else 1)\nPYEOF",
+   "timeoutMs": 60000,
+   "expected": {
+    "expectedResult": "C2-CLASS-SPANNING-REQUIRED",
+    "successCriteria": "exit 0, output contains C2-CLASS-SPANNING-REQUIRED",
+    "failureCriteria": "constant predictor fails to win the single-class batch"
+   },
+   "criteria": {
+    "exitCode": 0,
+    "outputContains": [
+     "C2-CLASS-SPANNING-REQUIRED"
+    ],
+    "outputNotContains": []
+   },
+   "flags": {
+    "critical": true,
+    "requiresNetwork": false,
+    "destructive": false
+   }
+  },
+  {
+   "name": "C4a healthy pipeline must PASS the protocol (pure-python MLP, FD-certified)",
+   "objective": "known-correct implementation (finite-difference gradient check) memorizes 12 class-spanning samples: 100% batch accuracy, loss far below ln(4) baseline",
+   "category": "unit",
+   "command": "python3 - healthy 4 <<'PYEOF'\nimport math, random, sys\n\n# C4 protocol core: pure-python MLP 6 -> dh(ReLU) -> 4, CE loss, SGD.\n# Modes:\n#   healthy  DH        - FD gradient check + 400 steps @ lr 0.5. Protocol must PASS.\n#   shuffled 4         - misaligned labels, protocol escalation (1600 total, lr 1.0).\n#                        Protocol must FAIL -> mechanical bug correctly flagged.\n#   boundary 16        - EXCESS capacity at the SAME budget as healthy (400 @ 0.5):\n#                        misaligned labels get fully memorized -> documents the\n#                        capacity boundary of the protocol's inference.\ndef gen_data(seed=42, n=12, din=6, K=4):\n    rng = random.Random(seed)\n    centers = [[rng.uniform(-1, 1) for _ in range(din)] for _ in range(K)]\n    X, Y = [], []\n    for i in range(n):\n        c = i % K\n        X.append([centers[c][j] + rng.gauss(0, 0.25) for j in range(din)])\n        Y.append(c)\n    return X, Y\n\ndef init_net(seed=7, din=6, dh=4, K=4):\n    rng = random.Random(seed)\n    W1 = [[rng.gauss(0, math.sqrt(2.0 / din)) for _ in range(dh)] for _ in range(din)]\n    b1 = [0.0] * dh\n    W2 = [[rng.gauss(0, math.sqrt(2.0 / dh)) for _ in range(K)] for _ in range(dh)]\n    b2 = [0.0] * K\n    return W1, b1, W2, b2\n\ndef forward(X, W1, b1, W2, b2):\n    H, L = [], []\n    for x in X:\n        h = [max(0.0, sum(x[i] * W1[i][j] for i in range(len(x))) + b1[j]) for j in range(len(b1))]\n        l = [sum(h[j] * W2[j][k] for j in range(len(h))) + b2[k] for k in range(len(b2))]\n        H.append(h); L.append(l)\n    return H, L\n\ndef softmax(l):\n    m = max(l); e = [math.exp(v - m) for v in l]; s = sum(e)\n    return [v / s for v in e]\n\ndef loss_acc(L, Y):\n    tot = 0.0; hit = 0\n    for l, y in zip(L, Y):\n        p = softmax(l); tot += -math.log(p[y])\n        if max(range(len(p)), key=lambda k: p[k]) == y: hit += 1\n    return tot / len(Y), hit / len(Y)\n\ndef grads(X, Y, W1, b1, W2, b2):\n    H, L = forward(X, W1, b1, W2, b2)\n    n, din, dh, K = len(Y), len(W1), len(b1), len(b2)\n    P = [softmax(l) for l in L]\n    dW1 = [[0.0] * dh for _ in range(din)]; db1 = [0.0] * dh\n    dW2 = [[0.0] * K for _ in range(dh)]; db2 = [0.0] * K\n    for s in range(n):\n        dl = [P[s][k] - (1.0 if k == Y[s] else 0.0) for k in range(K)]\n        for j in range(dh):\n            for k in range(K): dW2[j][k] += H[s][j] * dl[k] / n\n        for k in range(K): db2[k] += dl[k] / n\n        for j in range(dh):\n            if H[s][j] <= 0: continue\n            g = sum(dl[k] * W2[j][k] for k in range(K))\n            for i in range(din): dW1[i][j] += X[s][i] * g / n\n            db1[j] += g / n\n    return dW1, db1, dW2, db2\n\ndef sgd(W1, b1, W2, b2, dW1, db1, dW2, db2, lr):\n    for i in range(len(W1)):\n        for j in range(len(W1[0])): W1[i][j] -= lr * dW1[i][j]\n    for j in range(len(b1)): b1[j] -= lr * db1[j]\n    for j in range(len(W2)):\n        for k in range(len(W2[0])): W2[j][k] -= lr * dW2[j][k]\n    for k in range(len(b2)): b2[k] -= lr * db2[k]\n\ndef train(X, Y, W1, b1, W2, b2, steps, lr):\n    for _ in range(steps):\n        dW1, db1, dW2, db2 = grads(X, Y, W1, b1, W2, b2)\n        sgd(W1, b1, W2, b2, dW1, db1, dW2, db2, lr)\n    return loss_acc(forward(X, W1, b1, W2, b2)[1], Y)\n\nlnK = math.log(4)\nmode = sys.argv[1] if len(sys.argv) > 1 else 'healthy'\ndh = int(sys.argv[2]) if len(sys.argv) > 2 else 4\nX, Y = gen_data()\nif mode in ('shuffled', 'boundary'):\n    s = random.Random(99)\n    Y = Y[:]\n    s.shuffle(Y)\nW1, b1, W2, b2 = init_net(dh=dh)\n\nif mode == 'healthy':\n    # FD gradient check certifies the implementation is mechanically correct\n    eps = 1e-6\n    rng = random.Random(123)\n    worst = 0.0\n    for (mat, i, j) in [(W1, rng.randrange(6), rng.randrange(dh)) for _ in range(3)] + \\\n                        [(W2, rng.randrange(dh), rng.randrange(4)) for _ in range(2)]:\n        orig = mat[i][j]\n        mat[i][j] = orig + eps\n        lp, _ = loss_acc(forward(X, W1, b1, W2, b2)[1], Y)\n        mat[i][j] = orig - eps\n        lm, _ = loss_acc(forward(X, W1, b1, W2, b2)[1], Y)\n        mat[i][j] = orig\n        num = (lp - lm) / (2 * eps)\n        dW1, db1, dW2, db2 = grads(X, Y, W1, b1, W2, b2)\n        ana = dW1[i][j] if mat is W1 else dW2[i][j]\n        worst = max(worst, abs(num - ana) / max(abs(num), abs(ana), 1e-12))\n    print(f\"C4a FD-gradient-check max-rel-err={worst:.3e} (dh={dh})\")\n    if worst >= 1e-4:\n        print(\"C4a-FAILED-FDCHECK\"); sys.exit(1)\n    loss0, acc0 = loss_acc(forward(X, W1, b1, W2, b2)[1], Y)\n    lossf, accf = train(X, Y, W1, b1, W2, b2, 400, 0.5)\n    print(f\"C4a step0 loss={loss0:.6f} (~ln4={lnK:.6f}) acc={acc0 * 100:.1f}PCT\")\n    print(f\"C4a final loss={lossf:.6f} acc={accf * 100:.1f}PCT steps=400 lr=0.5 dh={dh}\")\n    passed = (accf == 1.0) and (lossf < 0.1 * lnK)\n    print(\"C4a-PROTOCOL-PASS\" if passed else \"C4a-PROTOCOL-NOT-PASSED\")\n    print(\"C4a-HEALTHY-PIPELINE-VERIFIED\" if passed else \"C4a-FAILED\")\n    sys.exit(0 if passed else 1)\n\nif mode == 'shuffled':\n    print(\"C4b mechanical bug: labels shuffled independently of inputs (dh=4, task-matched)\")\n    loss1, acc1 = train(X, Y, W1, b1, W2, b2, 400, 0.5)\n    # protocol escalation: train LONGER (4x total) at RAISED lr (2x)\n    loss2, acc2 = train(X, Y, W1, b1, W2, b2, 1200, 1.0)\n    print(f\"C4b phase1 (400 steps, lr 0.5): loss={loss1:.6f} acc={acc1 * 100:.1f}PCT\")\n    print(f\"C4b phase2 (1600 total steps, lr 1.0): loss={loss2:.6f} acc={acc2 * 100:.1f}PCT\")\n    print(f\"C4b chance floor ln(4)={lnK:.6f}; protocol pass bar: acc=100PCT and loss<0.1*lnK={0.1 * lnK:.6f}\")\n    protocol_fails = (acc2 < 1.0) or (loss2 > 0.1 * lnK)\n    print(\"C4b-PROTOCOL-FAIL-DETECTED\" if protocol_fails else \"C4b-PROTOCOL-PASS-UNEXPECTED\")\n    print(\"C4b-MECHANICAL-BUG-CORRECTLY-FLAGGED\" if protocol_fails else \"C4b-DISCRIMINATION-BROKE\")\n    sys.exit(0 if protocol_fails else 1)\n\nif mode == 'boundary':\n    print(\"C4c excess capacity: SAME budget as healthy (400 steps, lr 0.5) but dh=16 on misaligned labels\")\n    lossf, accf = train(X, Y, W1, b1, W2, b2, 400, 0.5)\n    print(f\"C4c final loss={lossf:.6f} acc={accf * 100:.1f}PCT steps=400 lr=0.5 dh=16\")\n    memorized = (accf == 1.0) and (lossf < 0.1)\n    print(\"C4c-EXCESS-CAPACITY-MEMORIZES-SHUFFLED\" if memorized else \"C4c-EXCESS-CAPACITY-DID-NOT-MEMORIZE\")\n    print(\"C4c-CAPACITY-BOUNDARY-DOCUMENTED\" if memorized else \"C4c-OBSERVATION-DIFFERS\")\n    sys.exit(0 if memorized else 1)\nPYEOF",
+   "timeoutMs": 120000,
+   "expected": {
+    "expectedResult": "C4a-HEALTHY-PIPELINE-VERIFIED",
+    "successCriteria": "exit 0, FD rel-err < 1e-4, final acc 100%, loss < 0.1*ln(4)",
+    "failureCriteria": "FD check fails or healthy pipeline does not pass the protocol"
+   },
+   "criteria": {
+    "exitCode": 0,
+    "outputContains": [
+     "C4a-HEALTHY-PIPELINE-VERIFIED"
+    ],
+    "outputNotContains": []
+   },
+   "flags": {
+    "critical": true,
+    "requiresNetwork": false,
+    "destructive": false
+   }
+  },
+  {
+   "name": "C4b label-misaligned copy must FAIL the protocol (negative control)",
+   "objective": "same architecture at task-matched capacity on independently shuffled labels: protocol escalation (4x steps, raised LR) still fails the pass bar -> mechanical bug correctly flagged",
+   "category": "negative",
+   "command": "python3 - shuffled 4 <<'PYEOF'\nimport math, random, sys\n\n# C4 protocol core: pure-python MLP 6 -> dh(ReLU) -> 4, CE loss, SGD.\n# Modes:\n#   healthy  DH        - FD gradient check + 400 steps @ lr 0.5. Protocol must PASS.\n#   shuffled 4         - misaligned labels, protocol escalation (1600 total, lr 1.0).\n#                        Protocol must FAIL -> mechanical bug correctly flagged.\n#   boundary 16        - EXCESS capacity at the SAME budget as healthy (400 @ 0.5):\n#                        misaligned labels get fully memorized -> documents the\n#                        capacity boundary of the protocol's inference.\ndef gen_data(seed=42, n=12, din=6, K=4):\n    rng = random.Random(seed)\n    centers = [[rng.uniform(-1, 1) for _ in range(din)] for _ in range(K)]\n    X, Y = [], []\n    for i in range(n):\n        c = i % K\n        X.append([centers[c][j] + rng.gauss(0, 0.25) for j in range(din)])\n        Y.append(c)\n    return X, Y\n\ndef init_net(seed=7, din=6, dh=4, K=4):\n    rng = random.Random(seed)\n    W1 = [[rng.gauss(0, math.sqrt(2.0 / din)) for _ in range(dh)] for _ in range(din)]\n    b1 = [0.0] * dh\n    W2 = [[rng.gauss(0, math.sqrt(2.0 / dh)) for _ in range(K)] for _ in range(dh)]\n    b2 = [0.0] * K\n    return W1, b1, W2, b2\n\ndef forward(X, W1, b1, W2, b2):\n    H, L = [], []\n    for x in X:\n        h = [max(0.0, sum(x[i] * W1[i][j] for i in range(len(x))) + b1[j]) for j in range(len(b1))]\n        l = [sum(h[j] * W2[j][k] for j in range(len(h))) + b2[k] for k in range(len(b2))]\n        H.append(h); L.append(l)\n    return H, L\n\ndef softmax(l):\n    m = max(l); e = [math.exp(v - m) for v in l]; s = sum(e)\n    return [v / s for v in e]\n\ndef loss_acc(L, Y):\n    tot = 0.0; hit = 0\n    for l, y in zip(L, Y):\n        p = softmax(l); tot += -math.log(p[y])\n        if max(range(len(p)), key=lambda k: p[k]) == y: hit += 1\n    return tot / len(Y), hit / len(Y)\n\ndef grads(X, Y, W1, b1, W2, b2):\n    H, L = forward(X, W1, b1, W2, b2)\n    n, din, dh, K = len(Y), len(W1), len(b1), len(b2)\n    P = [softmax(l) for l in L]\n    dW1 = [[0.0] * dh for _ in range(din)]; db1 = [0.0] * dh\n    dW2 = [[0.0] * K for _ in range(dh)]; db2 = [0.0] * K\n    for s in range(n):\n        dl = [P[s][k] - (1.0 if k == Y[s] else 0.0) for k in range(K)]\n        for j in range(dh):\n            for k in range(K): dW2[j][k] += H[s][j] * dl[k] / n\n        for k in range(K): db2[k] += dl[k] / n\n        for j in range(dh):\n            if H[s][j] <= 0: continue\n            g = sum(dl[k] * W2[j][k] for k in range(K))\n            for i in range(din): dW1[i][j] += X[s][i] * g / n\n            db1[j] += g / n\n    return dW1, db1, dW2, db2\n\ndef sgd(W1, b1, W2, b2, dW1, db1, dW2, db2, lr):\n    for i in range(len(W1)):\n        for j in range(len(W1[0])): W1[i][j] -= lr * dW1[i][j]\n    for j in range(len(b1)): b1[j] -= lr * db1[j]\n    for j in range(len(W2)):\n        for k in range(len(W2[0])): W2[j][k] -= lr * dW2[j][k]\n    for k in range(len(b2)): b2[k] -= lr * db2[k]\n\ndef train(X, Y, W1, b1, W2, b2, steps, lr):\n    for _ in range(steps):\n        dW1, db1, dW2, db2 = grads(X, Y, W1, b1, W2, b2)\n        sgd(W1, b1, W2, b2, dW1, db1, dW2, db2, lr)\n    return loss_acc(forward(X, W1, b1, W2, b2)[1], Y)\n\nlnK = math.log(4)\nmode = sys.argv[1] if len(sys.argv) > 1 else 'healthy'\ndh = int(sys.argv[2]) if len(sys.argv) > 2 else 4\nX, Y = gen_data()\nif mode in ('shuffled', 'boundary'):\n    s = random.Random(99)\n    Y = Y[:]\n    s.shuffle(Y)\nW1, b1, W2, b2 = init_net(dh=dh)\n\nif mode == 'healthy':\n    # FD gradient check certifies the implementation is mechanically correct\n    eps = 1e-6\n    rng = random.Random(123)\n    worst = 0.0\n    for (mat, i, j) in [(W1, rng.randrange(6), rng.randrange(dh)) for _ in range(3)] + \\\n                        [(W2, rng.randrange(dh), rng.randrange(4)) for _ in range(2)]:\n        orig = mat[i][j]\n        mat[i][j] = orig + eps\n        lp, _ = loss_acc(forward(X, W1, b1, W2, b2)[1], Y)\n        mat[i][j] = orig - eps\n        lm, _ = loss_acc(forward(X, W1, b1, W2, b2)[1], Y)\n        mat[i][j] = orig\n        num = (lp - lm) / (2 * eps)\n        dW1, db1, dW2, db2 = grads(X, Y, W1, b1, W2, b2)\n        ana = dW1[i][j] if mat is W1 else dW2[i][j]\n        worst = max(worst, abs(num - ana) / max(abs(num), abs(ana), 1e-12))\n    print(f\"C4a FD-gradient-check max-rel-err={worst:.3e} (dh={dh})\")\n    if worst >= 1e-4:\n        print(\"C4a-FAILED-FDCHECK\"); sys.exit(1)\n    loss0, acc0 = loss_acc(forward(X, W1, b1, W2, b2)[1], Y)\n    lossf, accf = train(X, Y, W1, b1, W2, b2, 400, 0.5)\n    print(f\"C4a step0 loss={loss0:.6f} (~ln4={lnK:.6f}) acc={acc0 * 100:.1f}PCT\")\n    print(f\"C4a final loss={lossf:.6f} acc={accf * 100:.1f}PCT steps=400 lr=0.5 dh={dh}\")\n    passed = (accf == 1.0) and (lossf < 0.1 * lnK)\n    print(\"C4a-PROTOCOL-PASS\" if passed else \"C4a-PROTOCOL-NOT-PASSED\")\n    print(\"C4a-HEALTHY-PIPELINE-VERIFIED\" if passed else \"C4a-FAILED\")\n    sys.exit(0 if passed else 1)\n\nif mode == 'shuffled':\n    print(\"C4b mechanical bug: labels shuffled independently of inputs (dh=4, task-matched)\")\n    loss1, acc1 = train(X, Y, W1, b1, W2, b2, 400, 0.5)\n    # protocol escalation: train LONGER (4x total) at RAISED lr (2x)\n    loss2, acc2 = train(X, Y, W1, b1, W2, b2, 1200, 1.0)\n    print(f\"C4b phase1 (400 steps, lr 0.5): loss={loss1:.6f} acc={acc1 * 100:.1f}PCT\")\n    print(f\"C4b phase2 (1600 total steps, lr 1.0): loss={loss2:.6f} acc={acc2 * 100:.1f}PCT\")\n    print(f\"C4b chance floor ln(4)={lnK:.6f}; protocol pass bar: acc=100PCT and loss<0.1*lnK={0.1 * lnK:.6f}\")\n    protocol_fails = (acc2 < 1.0) or (loss2 > 0.1 * lnK)\n    print(\"C4b-PROTOCOL-FAIL-DETECTED\" if protocol_fails else \"C4b-PROTOCOL-PASS-UNEXPECTED\")\n    print(\"C4b-MECHANICAL-BUG-CORRECTLY-FLAGGED\" if protocol_fails else \"C4b-DISCRIMINATION-BROKE\")\n    sys.exit(0 if protocol_fails else 1)\n\nif mode == 'boundary':\n    print(\"C4c excess capacity: SAME budget as healthy (400 steps, lr 0.5) but dh=16 on misaligned labels\")\n    lossf, accf = train(X, Y, W1, b1, W2, b2, 400, 0.5)\n    print(f\"C4c final loss={lossf:.6f} acc={accf * 100:.1f}PCT steps=400 lr=0.5 dh=16\")\n    memorized = (accf == 1.0) and (lossf < 0.1)\n    print(\"C4c-EXCESS-CAPACITY-MEMORIZES-SHUFFLED\" if memorized else \"C4c-EXCESS-CAPACITY-DID-NOT-MEMORIZE\")\n    print(\"C4c-CAPACITY-BOUNDARY-DOCUMENTED\" if memorized else \"C4c-OBSERVATION-DIFFERS\")\n    sys.exit(0 if memorized else 1)\nPYEOF",
+   "timeoutMs": 120000,
+   "expected": {
+    "expectedResult": "C4b-MECHANICAL-BUG-CORRECTLY-FLAGGED",
+    "successCriteria": "exit 0, accuracy stays below 100% and/or loss above 0.1*ln(4) after escalation",
+    "failureCriteria": "shuffled labels pass the protocol bar (discriminating power broken at task-matched capacity)"
+   },
+   "criteria": {
+    "exitCode": 0,
+    "outputContains": [
+     "C4b-MECHANICAL-BUG-CORRECTLY-FLAGGED"
+    ],
+    "outputNotContains": []
+   },
+   "flags": {
+    "critical": true,
+    "requiresNetwork": false,
+    "destructive": false
+   }
+  },
+  {
+   "name": "C4c capacity boundary: excess capacity memorizes misaligned labels",
+   "objective": "at dh=16 (excess capacity) the SAME budget that the healthy run uses fully memorizes shuffled labels \u2014 the protocol's failure->mechanical-bug inference requires task-matched capacity (validates the record's own limitation note about reducing width)",
+   "category": "boundary",
+   "command": "python3 - boundary 16 <<'PYEOF'\nimport math, random, sys\n\n# C4 protocol core: pure-python MLP 6 -> dh(ReLU) -> 4, CE loss, SGD.\n# Modes:\n#   healthy  DH        - FD gradient check + 400 steps @ lr 0.5. Protocol must PASS.\n#   shuffled 4         - misaligned labels, protocol escalation (1600 total, lr 1.0).\n#                        Protocol must FAIL -> mechanical bug correctly flagged.\n#   boundary 16        - EXCESS capacity at the SAME budget as healthy (400 @ 0.5):\n#                        misaligned labels get fully memorized -> documents the\n#                        capacity boundary of the protocol's inference.\ndef gen_data(seed=42, n=12, din=6, K=4):\n    rng = random.Random(seed)\n    centers = [[rng.uniform(-1, 1) for _ in range(din)] for _ in range(K)]\n    X, Y = [], []\n    for i in range(n):\n        c = i % K\n        X.append([centers[c][j] + rng.gauss(0, 0.25) for j in range(din)])\n        Y.append(c)\n    return X, Y\n\ndef init_net(seed=7, din=6, dh=4, K=4):\n    rng = random.Random(seed)\n    W1 = [[rng.gauss(0, math.sqrt(2.0 / din)) for _ in range(dh)] for _ in range(din)]\n    b1 = [0.0] * dh\n    W2 = [[rng.gauss(0, math.sqrt(2.0 / dh)) for _ in range(K)] for _ in range(dh)]\n    b2 = [0.0] * K\n    return W1, b1, W2, b2\n\ndef forward(X, W1, b1, W2, b2):\n    H, L = [], []\n    for x in X:\n        h = [max(0.0, sum(x[i] * W1[i][j] for i in range(len(x))) + b1[j]) for j in range(len(b1))]\n        l = [sum(h[j] * W2[j][k] for j in range(len(h))) + b2[k] for k in range(len(b2))]\n        H.append(h); L.append(l)\n    return H, L\n\ndef softmax(l):\n    m = max(l); e = [math.exp(v - m) for v in l]; s = sum(e)\n    return [v / s for v in e]\n\ndef loss_acc(L, Y):\n    tot = 0.0; hit = 0\n    for l, y in zip(L, Y):\n        p = softmax(l); tot += -math.log(p[y])\n        if max(range(len(p)), key=lambda k: p[k]) == y: hit += 1\n    return tot / len(Y), hit / len(Y)\n\ndef grads(X, Y, W1, b1, W2, b2):\n    H, L = forward(X, W1, b1, W2, b2)\n    n, din, dh, K = len(Y), len(W1), len(b1), len(b2)\n    P = [softmax(l) for l in L]\n    dW1 = [[0.0] * dh for _ in range(din)]; db1 = [0.0] * dh\n    dW2 = [[0.0] * K for _ in range(dh)]; db2 = [0.0] * K\n    for s in range(n):\n        dl = [P[s][k] - (1.0 if k == Y[s] else 0.0) for k in range(K)]\n        for j in range(dh):\n            for k in range(K): dW2[j][k] += H[s][j] * dl[k] / n\n        for k in range(K): db2[k] += dl[k] / n\n        for j in range(dh):\n            if H[s][j] <= 0: continue\n            g = sum(dl[k] * W2[j][k] for k in range(K))\n            for i in range(din): dW1[i][j] += X[s][i] * g / n\n            db1[j] += g / n\n    return dW1, db1, dW2, db2\n\ndef sgd(W1, b1, W2, b2, dW1, db1, dW2, db2, lr):\n    for i in range(len(W1)):\n        for j in range(len(W1[0])): W1[i][j] -= lr * dW1[i][j]\n    for j in range(len(b1)): b1[j] -= lr * db1[j]\n    for j in range(len(W2)):\n        for k in range(len(W2[0])): W2[j][k] -= lr * dW2[j][k]\n    for k in range(len(b2)): b2[k] -= lr * db2[k]\n\ndef train(X, Y, W1, b1, W2, b2, steps, lr):\n    for _ in range(steps):\n        dW1, db1, dW2, db2 = grads(X, Y, W1, b1, W2, b2)\n        sgd(W1, b1, W2, b2, dW1, db1, dW2, db2, lr)\n    return loss_acc(forward(X, W1, b1, W2, b2)[1], Y)\n\nlnK = math.log(4)\nmode = sys.argv[1] if len(sys.argv) > 1 else 'healthy'\ndh = int(sys.argv[2]) if len(sys.argv) > 2 else 4\nX, Y = gen_data()\nif mode in ('shuffled', 'boundary'):\n    s = random.Random(99)\n    Y = Y[:]\n    s.shuffle(Y)\nW1, b1, W2, b2 = init_net(dh=dh)\n\nif mode == 'healthy':\n    # FD gradient check certifies the implementation is mechanically correct\n    eps = 1e-6\n    rng = random.Random(123)\n    worst = 0.0\n    for (mat, i, j) in [(W1, rng.randrange(6), rng.randrange(dh)) for _ in range(3)] + \\\n                        [(W2, rng.randrange(dh), rng.randrange(4)) for _ in range(2)]:\n        orig = mat[i][j]\n        mat[i][j] = orig + eps\n        lp, _ = loss_acc(forward(X, W1, b1, W2, b2)[1], Y)\n        mat[i][j] = orig - eps\n        lm, _ = loss_acc(forward(X, W1, b1, W2, b2)[1], Y)\n        mat[i][j] = orig\n        num = (lp - lm) / (2 * eps)\n        dW1, db1, dW2, db2 = grads(X, Y, W1, b1, W2, b2)\n        ana = dW1[i][j] if mat is W1 else dW2[i][j]\n        worst = max(worst, abs(num - ana) / max(abs(num), abs(ana), 1e-12))\n    print(f\"C4a FD-gradient-check max-rel-err={worst:.3e} (dh={dh})\")\n    if worst >= 1e-4:\n        print(\"C4a-FAILED-FDCHECK\"); sys.exit(1)\n    loss0, acc0 = loss_acc(forward(X, W1, b1, W2, b2)[1], Y)\n    lossf, accf = train(X, Y, W1, b1, W2, b2, 400, 0.5)\n    print(f\"C4a step0 loss={loss0:.6f} (~ln4={lnK:.6f}) acc={acc0 * 100:.1f}PCT\")\n    print(f\"C4a final loss={lossf:.6f} acc={accf * 100:.1f}PCT steps=400 lr=0.5 dh={dh}\")\n    passed = (accf == 1.0) and (lossf < 0.1 * lnK)\n    print(\"C4a-PROTOCOL-PASS\" if passed else \"C4a-PROTOCOL-NOT-PASSED\")\n    print(\"C4a-HEALTHY-PIPELINE-VERIFIED\" if passed else \"C4a-FAILED\")\n    sys.exit(0 if passed else 1)\n\nif mode == 'shuffled':\n    print(\"C4b mechanical bug: labels shuffled independently of inputs (dh=4, task-matched)\")\n    loss1, acc1 = train(X, Y, W1, b1, W2, b2, 400, 0.5)\n    # protocol escalation: train LONGER (4x total) at RAISED lr (2x)\n    loss2, acc2 = train(X, Y, W1, b1, W2, b2, 1200, 1.0)\n    print(f\"C4b phase1 (400 steps, lr 0.5): loss={loss1:.6f} acc={acc1 * 100:.1f}PCT\")\n    print(f\"C4b phase2 (1600 total steps, lr 1.0): loss={loss2:.6f} acc={acc2 * 100:.1f}PCT\")\n    print(f\"C4b chance floor ln(4)={lnK:.6f}; protocol pass bar: acc=100PCT and loss<0.1*lnK={0.1 * lnK:.6f}\")\n    protocol_fails = (acc2 < 1.0) or (loss2 > 0.1 * lnK)\n    print(\"C4b-PROTOCOL-FAIL-DETECTED\" if protocol_fails else \"C4b-PROTOCOL-PASS-UNEXPECTED\")\n    print(\"C4b-MECHANICAL-BUG-CORRECTLY-FLAGGED\" if protocol_fails else \"C4b-DISCRIMINATION-BROKE\")\n    sys.exit(0 if protocol_fails else 1)\n\nif mode == 'boundary':\n    print(\"C4c excess capacity: SAME budget as healthy (400 steps, lr 0.5) but dh=16 on misaligned labels\")\n    lossf, accf = train(X, Y, W1, b1, W2, b2, 400, 0.5)\n    print(f\"C4c final loss={lossf:.6f} acc={accf * 100:.1f}PCT steps=400 lr=0.5 dh=16\")\n    memorized = (accf == 1.0) and (lossf < 0.1)\n    print(\"C4c-EXCESS-CAPACITY-MEMORIZES-SHUFFLED\" if memorized else \"C4c-EXCESS-CAPACITY-DID-NOT-MEMORIZE\")\n    print(\"C4c-CAPACITY-BOUNDARY-DOCUMENTED\" if memorized else \"C4c-OBSERVATION-DIFFERS\")\n    sys.exit(0 if memorized else 1)\nPYEOF",
+   "timeoutMs": 120000,
+   "expected": {
+    "expectedResult": "C4c-CAPACITY-BOUNDARY-DOCUMENTED",
+    "successCriteria": "exit 0, shuffled labels reach 100% accuracy and loss < 0.1 at dh=16 within the healthy budget",
+    "failureCriteria": "boundary behavior does not reproduce (result would still be reported honestly)"
+   },
+   "criteria": {
+    "exitCode": 0,
+    "outputContains": [
+     "C4c-CAPACITY-BOUNDARY-DOCUMENTED"
+    ],
+    "outputNotContains": []
+   },
+   "flags": {
+    "critical": true,
+    "requiresNetwork": false,
+    "destructive": false
+   }
+  },
+  {
+   "name": "C5 fixed loss threshold is scale-dependent (false-fails large-scale MSE)",
+   "objective": "identical regression problems at target scale 1 vs 1000, both fitted to the noise floor: fixed loss<1e-2 gives opposite verdicts; scale-relative criteria (R2) are consistent",
+   "category": "boundary",
+   "command": "python3 - <<'PYEOF'\nimport math, random, sys\n\n# Fixed absolute thresholds are invalid across target scales. Two identical\n# regression problems differing ONLY in target scale (1x vs 1000x): the whole\n# target (signal AND noise) is scaled. Both are fitted to their irreducible\n# noise floor by exact least squares - i.e. both are \"fully memorized\" in the\n# sense that no model can beat the noise floor.\nrng = random.Random(2024)\n\ndef make_data(scale):\n    xs, ys = [], []\n    for i in range(40):\n        x = rng.uniform(0, 1)\n        y = (3.0 * x + rng.gauss(0, 0.01)) * scale\n        xs.append(x); ys.append(y)\n    return xs, ys\n\ndef fit_least_squares(xs, ys):\n    n = len(xs)\n    mx = sum(xs) / n; my = sum(ys) / n\n    sxx = sum((x - mx) ** 2 for x in xs)\n    sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))\n    w = sxy / sxx\n    b = my - w * mx\n    return w, b\n\ndef mse_and_r2(xs, ys, w, b):\n    n = len(xs)\n    mse = sum((y - (w * x + b)) ** 2 for x, y in zip(xs, ys)) / n\n    var = sum((y - (sum(ys) / n)) ** 2 for y in ys) / n\n    return mse, 1.0 - mse / var\n\nresults = {}\nfor name, scale in ((\"scale1\", 1.0), (\"scale1000\", 1000.0)):\n    xs, ys = make_data(scale)\n    w, b = fit_least_squares(xs, ys)\n    mse, r2 = mse_and_r2(xs, ys, w, b)\n    results[name] = (mse, r2)\n    fixed = \"PASS\" if mse < 1e-2 else \"FAIL\"\n    print(f\"C5 {name}: MSE={mse:.6f} R2={r2:.6f} fixed-threshold(loss<1e-2)={fixed}\")\n\nfixed_scale1 = results[\"scale1\"][0] < 1e-2\nfixed_scale1000 = results[\"scale1000\"][0] < 1e-2\nrel_ok = results[\"scale1\"][1] > 0.99 and results[\"scale1000\"][1] > 0.99\n\nopposite = fixed_scale1 != fixed_scale1000\nprint(f\"C5 fixed-threshold verdicts differ across scales: {opposite}\")\nprint(f\"C5 scale-relative (R2>0.99) verdicts consistent: {rel_ok}\")\nok = opposite and rel_ok\nprint(\"C5-FIXED-THRESHOLD-SCALE-DEPENDENT\" if opposite else \"C5-FIXED-THRESHOLD-HELD\")\nprint(\"C5-SCALE-RELATIVE-CRITERIA-REQUIRED\" if ok else \"C5-FAILED\")\nsys.exit(0 if ok else 1)\nPYEOF",
+   "timeoutMs": 60000,
+   "expected": {
+    "expectedResult": "C5-SCALE-RELATIVE-CRITERIA-REQUIRED",
+    "successCriteria": "exit 0, fixed threshold verdicts differ across scales while R2>0.99 both",
+    "failureCriteria": "fixed threshold holds across scales or relative criteria disagree"
+   },
+   "criteria": {
+    "exitCode": 0,
+    "outputContains": [
+     "C5-SCALE-RELATIVE-CRITERIA-REQUIRED"
+    ],
+    "outputNotContains": []
+   },
+   "flags": {
+    "critical": true,
+    "requiresNetwork": false,
+    "destructive": false
+   }
+  },
+  {
+   "name": "C6 zero grads are normal: naive all-nonzero assertion is a false-positive generator",
+   "objective": "healthy memorizing pipeline with dead ReLU units carries exactly-zero grads; the naive assertion fails while the correct assertion (no NaN/Inf + per-layer nonzero) passes",
+   "category": "negative",
+   "command": "python3 - <<'PYEOF'\nimport math, random, sys\n\n# Zero gradients on individual parameters are NORMAL in a healthy pipeline\n# (dead ReLU units); asserting all-non-zero grads is a false-positive machine.\ndef gen_data(seed=42, n=12, din=6, K=4):\n    rng = random.Random(seed)\n    centers = [[rng.uniform(-1, 1) for _ in range(din)] for _ in range(K)]\n    X, Y = [], []\n    for i in range(n):\n        c = i % K\n        X.append([centers[c][j] + rng.gauss(0, 0.25) for j in range(din)])\n        Y.append(c)\n    return X, Y\n\ndef init_net(seed=7, din=6, dh=16, K=4):\n    # dead_bias: half the hidden units start with a strongly negative bias and\n    # never activate on this tiny batch -> exactly-zero grads, by construction\n    rng = random.Random(seed)\n    W1 = [[rng.gauss(0, math.sqrt(2.0 / din)) for _ in range(dh)] for _ in range(din)]\n    b1 = [-3.0 if j >= dh // 2 else 0.0 for j in range(dh)]\n    W2 = [[rng.gauss(0, math.sqrt(2.0 / dh)) for _ in range(K)] for _ in range(dh)]\n    b2 = [0.0] * K\n    return W1, b1, W2, b2\n\ndef forward(X, W1, b1, W2, b2):\n    H, L = [], []\n    for x in X:\n        h = [max(0.0, sum(x[i] * W1[i][j] for i in range(len(x))) + b1[j]) for j in range(len(b1))]\n        l = [sum(h[j] * W2[j][k] for j in range(len(h))) + b2[k] for k in range(len(b2))]\n        H.append(h); L.append(l)\n    return H, L\n\ndef softmax(l):\n    m = max(l); e = [math.exp(v - m) for v in l]; s = sum(e)\n    return [v / s for v in e]\n\ndef loss_acc(L, Y):\n    tot = 0.0; hit = 0\n    for l, y in zip(L, Y):\n        p = softmax(l); tot += -math.log(p[y])\n        if max(range(len(p)), key=lambda k: p[k]) == y: hit += 1\n    return tot / len(Y), hit / len(Y)\n\ndef grads(X, Y, W1, b1, W2, b2):\n    H, L = forward(X, W1, b1, W2, b2)\n    n, din, dh, K = len(Y), len(W1), len(b1), len(b2)\n    P = [softmax(l) for l in L]\n    dW1 = [[0.0] * dh for _ in range(din)]; db1 = [0.0] * dh\n    dW2 = [[0.0] * K for _ in range(dh)]; db2 = [0.0] * K\n    for s in range(n):\n        dl = [P[s][k] - (1.0 if k == Y[s] else 0.0) for k in range(K)]\n        for j in range(dh):\n            for k in range(K): dW2[j][k] += H[s][j] * dl[k] / n\n        for k in range(K): db2[k] += dl[k] / n\n        for j in range(dh):\n            if H[s][j] <= 0: continue\n            g = sum(dl[k] * W2[j][k] for k in range(K))\n            for i in range(din): dW1[i][j] += X[s][i] * g / n\n            db1[j] += g / n\n    return dW1, db1, dW2, db2\n\ndef sgd(W1, b1, W2, b2, dW1, db1, dW2, db2, lr):\n    for i in range(len(W1)):\n        for j in range(len(W1[0])): W1[i][j] -= lr * dW1[i][j]\n    for j in range(len(b1)): b1[j] -= lr * db1[j]\n    for j in range(len(W2)):\n        for k in range(len(W2[0])): W2[j][k] -= lr * dW2[j][k]\n    for k in range(len(b2)): b2[k] -= lr * db2[k]\n\ndef count_zero(tensors):\n    tot = 0; zero = 0\n    for t in tensors:\n        for row in t:\n            for v in row:\n                tot += 1\n                if v == 0.0: zero += 1\n    return tot, zero\n\nX, Y = gen_data()\nW1, b1, W2, b2 = init_net()  # half the hidden units are dead by construction\n\nfor step in range(600):\n    dW1, db1, dW2, db2 = grads(X, Y, W1, b1, W2, b2)\n    sgd(W1, b1, W2, b2, dW1, db1, dW2, db2, 0.5)\n\nLf = forward(X, W1, b1, W2, b2)[1]\nlossf, accf = loss_acc(Lf, Y)\ntot, zero = count_zero((dW1, dW2))\nnan_inf = any((v != v) or math.isinf(v) for t in (dW1, dW2) for row in t for v in row)\nper_layer_nonzero = any(abs(v) > 0 for row in dW1 for v in row) and any(abs(v) > 0 for row in dW2 for v in row)\n\n# dead-unit count actually observed in the forward pass\nH = forward(X, W1, b1, W2, b2)[0]\ndead_units = sum(1 for j in range(len(b1)) if all(h[j] == 0.0 for h in H))\n\nprint(f\"C6 training with dead-biased init: final loss={lossf:.6f} acc={accf * 100:.1f}PCT\")\nprint(f\"C6 dead hidden units on this batch={dead_units} of {len(b1)}\")\nprint(f\"C6 zero-grad weights={zero} of {tot}\")\nnaive_assertion_ok = (zero == 0) and not nan_inf\ncorrect_assertion_ok = (not nan_inf) and per_layer_nonzero\nprint(f\"C6 naive all-nonzero-grad assertion: {'PASS' if naive_assertion_ok else 'FAIL (false positive)'}\")\nprint(f\"C6 correct assertion (no NaN/Inf + every trainable layer has nonzero grad): {'PASS' if correct_assertion_ok else 'FAIL'}\")\n\nhealthy = accf == 1.0\nok = healthy and zero > 0 and (not naive_assertion_ok) and correct_assertion_ok\nprint(\"C6-ZERO-GRADS-NORMAL-CONFIRMED\" if ok else \"C6-FAILED\")\nsys.exit(0 if ok else 1)\nPYEOF",
+   "timeoutMs": 120000,
+   "expected": {
+    "expectedResult": "C6-ZERO-GRADS-NORMAL-CONFIRMED",
+    "successCriteria": "exit 0, training reaches 100% acc with zero-grad weights present, naive assertion fails, correct assertion passes",
+    "failureCriteria": "no zero grads in a healthy pipeline or naive assertion passes"
+   },
+   "criteria": {
+    "exitCode": 0,
+    "outputContains": [
+     "C6-ZERO-GRADS-NORMAL-CONFIRMED"
+    ],
+    "outputNotContains": []
+   },
+   "flags": {
+    "critical": true,
+    "requiresNetwork": false,
+    "destructive": false
+   }
+  },
+  {
+   "name": "C3 doc-based: PyTorch CrossEntropyLoss logits/dtype expectations (live fetch)",
+   "objective": "inspect the ACTUAL official PyTorch documentation from the user's machine: CE input must be unnormalized logits; target dtype long for class indices (record claims these are doc-verifiable per framework version)",
+   "category": "validation",
+   "command": "#!/usr/bin/env bash\n# C3 (doc-based): inspect the ACTUAL PyTorch documentation for CrossEntropyLoss\n# label-dtype and raw-logits expectations. Resolves the current stable version\n# from the official redirect, fetches that exact versioned page, and asserts\n# the documented statements. Executed on the user's machine through the bridge.\nset -u\nSTABLE='https://pytorch.org/docs/stable/generated/torch.nn.CrossEntropyLoss.html'\nREDIR=$(curl -sL --max-time 25 \"$STABLE\") || { echo \"C3-DOC-FETCH-FAILED: $STABLE\"; exit 1; }\nVER=$(printf '%s' \"$REDIR\" | grep -oE '[0-9]+\\.[0-9]+/generated' | head -1 | cut -d/ -f1)\nif [ -z \"$VER\" ]; then echo \"C3-DOC-VERSION-RESOLVE-FAILED\"; exit 1; fi\nURL=\"https://pytorch.org/docs/$VER/generated/torch.nn.CrossEntropyLoss.html\"\nTMPF=$(mktemp)\ncurl -sL --max-time 30 \"$URL\" -o \"$TMPF\" || { echo \"C3-DOC-FETCH-FAILED: $URL\"; rm -f \"$TMPF\"; exit 1; }\npython3 - \"$TMPF\" \"$VER\" \"$URL\" <<'PYEOF'\nimport sys, re, html\npath, ver, url = sys.argv[1], sys.argv[2], sys.argv[3]\nraw = open(path, encoding='utf-8', errors='replace').read()\ntext = html.unescape(re.sub(r'\\s+', ' ', re.sub(r'<[^>]+>', ' ', raw)))\nchecks = {\n    'raw-logits-expected': 'unnormalized logits for each class',\n    'target-dtype-long': 'The target data type is required to be',\n    'class-indices-context': 'when using class indices',\n}\nprint('DOC-SOURCE:', url)\nprint('DOC-VERSION:', ver)\nok = True\nfor name, needle in checks.items():\n    found = needle in text\n    print(f'DOC-{name}:', 'FOUND' if found else 'MISSING')\n    ok = ok and found\nm = re.search(r'The target data type[^.]*\\.[^.]*\\.?', text)\nif m: print('DOC-QUOTE-dtype:', m.group(0)[:320])\nm2 = re.search(r'[^.]{0,200}unnormalized logits for each class[^.]*\\.', text)\nif m2: print('DOC-QUOTE-logits:', m2.group(0)[:320])\nm3 = re.search(r'[^.]{0,120}class probabilities only when[^.]*\\.', text)\nif m3: print('DOC-QUOTE-softlabel-nuance:', m3.group(0)[:320])\nprint('C3-DOC-VERIFIED' if ok else 'C3-DOC-NOT-VERIFIED')\nsys.exit(0 if ok else 1)\nPYEOF\nrc=$?\nrm -f \"$TMPF\"\nexit $rc",
+   "timeoutMs": 90000,
+   "expected": {
+    "expectedResult": "C3-DOC-VERIFIED with DOC-SOURCE, DOC-VERSION and quoted sentences",
+    "successCriteria": "exit 0, all three documented phrases found in the fetched page, marker printed",
+    "failureCriteria": "doc fetch fails or the documented statements differ from the record's claim"
+   },
+   "criteria": {
+    "exitCode": 0,
+    "outputContains": [
+     "C3-DOC-VERIFIED"
+    ],
+    "outputNotContains": []
+   },
+   "flags": {
+    "critical": true,
+    "requiresNetwork": true,
+    "destructive": false
+   }
+  }
+ ],
+ "runId": "VRUN-000003"
+}
